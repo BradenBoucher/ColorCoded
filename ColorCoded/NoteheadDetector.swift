@@ -30,7 +30,7 @@ enum NoteheadDetector {
                         let split = splitMergedBoxes(boxes, cgImage: cg)
 
                         // NMS to reduce duplicates (keep close notes)
-                        let out = nonMaxSuppression(split, iouThreshold: 0.90)
+                        let out = nonMaxSuppression(split, iouThreshold: 0.85)
 
                         continuation.resume(returning: out)
                     }
