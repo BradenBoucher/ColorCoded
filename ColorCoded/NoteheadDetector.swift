@@ -8,6 +8,7 @@ enum NoteheadDetector {
     static func detectNoteheads(in image: PlatformImage) async -> [CGRect] {
         guard let cg = image.cgImageSafe else { return [] }
         let imageSize = image.size
+        let processed = ImagePreprocessor.preprocessForContours(cg) ?? cg
 
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -24,13 +25,14 @@ enum NoteheadDetector {
                         }
 
                         let boxes = extractEllipseLikeBoxes(from: obs, imageSize: imageSize)
-                        continuation.resume(returning: nonMaxSuppression(boxes, iouThreshold: 0.35))
+                        let split = splitMergedBoxes(boxes, cgImage: processed)
+                        continuation.resume(returning: nonMaxSuppression(split, iouThreshold: 0.7))
                     }
 
                     request.contrastAdjustment = 1.0
                     request.detectsDarkOnLight = true
 
-                    let handler = VNImageRequestHandler(cgImage: cg, orientation: .up, options: [:])
+                    let handler = VNImageRequestHandler(cgImage: processed, orientation: .up, options: [:])
                     try handler.perform([request])
                 } catch {
                     continuation.resume(returning: [])
@@ -100,30 +102,13 @@ enum NoteheadDetector {
         return interArea / max(1, unionArea)
     }
 
-    private static func splitMergedBoxes(_ boxes: [CGRect]) -> [CGRect] {
+    private static func splitMergedBoxes(_ boxes: [CGRect], cgImage: CGImage) -> [CGRect] {
         guard !boxes.isEmpty else { return [] }
-        let widths = boxes.map(\.width).sorted()
-        let medianWidth = widths[widths.count / 2]
-        let targetWidth = max(6, medianWidth)
         var out: [CGRect] = []
+        out.reserveCapacity(boxes.count)
 
         for box in boxes {
-            let ratio = box.width / targetWidth
-            if ratio > 1.6 {
-                let parts = min(4, max(2, Int(ratio.rounded())))
-                let partWidth = box.width / CGFloat(parts)
-                for i in 0..<parts {
-                    let rect = CGRect(
-                        x: box.minX + CGFloat(i) * partWidth,
-                        y: box.minY,
-                        width: partWidth,
-                        height: box.height
-                    )
-                    out.append(rect)
-                }
-            } else {
-                out.append(box)
-            }
+            out.append(contentsOf: NoteBlobSplitter.splitIfNeeded(rect: box, cg: cgImage))
         }
 
         return out

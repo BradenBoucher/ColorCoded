@@ -118,9 +118,11 @@ enum OfflineScoreColorizer {
             // Slightly transparent so we still see the note glyph
             ctx.cgContext.setAlpha(0.85)
 
+            let baseRadius = uniformRadius(from: noteheads)
+
             for rect in noteheads {
                 let center = CGPoint(x: rect.midX, y: rect.midY)
-                let radius = max(rect.width, rect.height) * 0.85
+                let radius = baseRadius
 
                 let pitchClass = PitchClassifier.classify(noteCenterY: center.y,
                                                           staff: staff)
@@ -143,5 +145,12 @@ enum OfflineScoreColorizer {
                                                      height: dotR * 2))
             }
         }
+    }
+
+    private static func uniformRadius(from noteheads: [CGRect]) -> CGFloat {
+        guard !noteheads.isEmpty else { return 8 }
+        let sizes = noteheads.map { max($0.width, $0.height) }.sorted()
+        let median = sizes[sizes.count / 2]
+        return max(8, median * 0.85)
     }
 }
