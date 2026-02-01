@@ -1,9 +1,14 @@
-import CoreGraphics
+import Foundation
+
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 enum PitchClass: CaseIterable {
     case A, B, C, D, E, F, G
 
-    // A red, then rainbow order onward
     var color: PlatformColor {
         switch self {
         case .A: return PlatformColor(red: 1.0, green: 0.0, blue: 0.0, alpha: 1.0)        // red
