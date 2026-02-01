@@ -1,9 +1,14 @@
-import CoreGraphics
+import Foundation
+
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 enum PitchClass: CaseIterable {
     case A, B, C, D, E, F, G
 
-    // A red, then rainbow order onward
     var color: PlatformColor {
         switch self {
         case .A: return PlatformColor(red: 1.0, green: 0.0, blue: 0.0, alpha: 1.0)        // red
@@ -73,24 +78,6 @@ enum PitchClassifier {
     }
 
     private static func closestStaff(to y: CGFloat, staves: [[CGFloat]]) -> ([CGFloat], Int)? {
-        var bandMatch: [(Int, CGFloat)] = []
-
-        for (i, staffLines) in staves.enumerated() {
-            let sorted = staffLines.sorted()
-            guard sorted.count == 5 else { continue }
-            let spacing = max(6, (sorted.last! - sorted.first!) / 4.0)
-            let bandMin = sorted.first! - spacing * 3
-            let bandMax = sorted.last! + spacing * 3
-            if y >= bandMin && y <= bandMax {
-                let centerY = (sorted.first! + sorted.last!) / 2.0
-                bandMatch.append((i, abs(centerY - y)))
-            }
-        }
-
-        if let best = bandMatch.sorted(by: { $0.1 < $1.1 }).first {
-            return (staves[best.0], best.0)
-        }
-
         var bestIndex: Int?
         var bestDist: CGFloat = .greatestFiniteMagnitude
 

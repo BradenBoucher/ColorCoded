@@ -30,8 +30,7 @@ enum NoteheadDetector {
                     request.contrastAdjustment = 1.0
                     request.detectsDarkOnLight = true
 
-                    let processed = ImagePreprocessor.preprocessForContours(cg) ?? cg
-                    let handler = VNImageRequestHandler(cgImage: processed, orientation: .up, options: [:])
+                    let handler = VNImageRequestHandler(cgImage: cg, orientation: .up, options: [:])
                     try handler.perform([request])
                 } catch {
                     continuation.resume(returning: [])
