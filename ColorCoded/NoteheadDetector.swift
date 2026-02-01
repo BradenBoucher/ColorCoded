@@ -58,13 +58,13 @@ enum NoteheadDetector {
                 height: boxN.size.height * imageSize.height
             )
 
-            // Heuristics: notehead-ish size
-            if box.width < 6 || box.height < 6 { continue }
-            if box.width > 60 || box.height > 60 { continue }
+            // Heuristics: notehead-ish size (looser to keep recall high)
+            if box.width < 4 || box.height < 4 { continue }
+            if box.width > 90 || box.height > 90 { continue }
 
-            // Heuristic: ellipse-ish aspect ratio (noteheads are oval)
+            // Heuristic: oval-ish aspect ratio, but allow wider for merged noteheads
             let ar = box.width / max(1, box.height)
-            if ar < 0.55 || ar > 2.2 { continue }
+            if ar < 0.4 || ar > 3.5 { continue }
 
             out.append(box.insetBy(dx: -1, dy: -1))
         }
@@ -98,5 +98,34 @@ enum NoteheadDetector {
         let interArea = inter.width * inter.height
         let unionArea = a.width * a.height + b.width * b.height - interArea
         return interArea / max(1, unionArea)
+    }
+
+    private static func splitMergedBoxes(_ boxes: [CGRect]) -> [CGRect] {
+        guard !boxes.isEmpty else { return [] }
+        let widths = boxes.map(\.width).sorted()
+        let medianWidth = widths[widths.count / 2]
+        let targetWidth = max(6, medianWidth)
+        var out: [CGRect] = []
+
+        for box in boxes {
+            let ratio = box.width / targetWidth
+            if ratio > 1.6 {
+                let parts = min(4, max(2, Int(ratio.rounded())))
+                let partWidth = box.width / CGFloat(parts)
+                for i in 0..<parts {
+                    let rect = CGRect(
+                        x: box.minX + CGFloat(i) * partWidth,
+                        y: box.minY,
+                        width: partWidth,
+                        height: box.height
+                    )
+                    out.append(rect)
+                }
+            } else {
+                out.append(box)
+            }
+        }
+
+        return out
     }
 }
