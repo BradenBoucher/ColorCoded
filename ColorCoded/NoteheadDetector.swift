@@ -44,7 +44,7 @@ enum NoteheadDetector {
         var out: [CGRect] = []
 
         // Pull top-level contours and child contours; noteheads often appear as small closed shapes.
-        let all = (0..<obs.contourCount).compactMap { obs.contour(at: $0) }
+        let all = (0..<obs.contourCount).compactMap { try? obs.contour(at: $0) }
 
         for c in all {
             // VNContour points are normalized (0..1). Convert to image coords.
