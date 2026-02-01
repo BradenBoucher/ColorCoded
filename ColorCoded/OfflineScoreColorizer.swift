@@ -24,6 +24,9 @@ enum OfflineScoreColorizer {
     }
 
     static func colorizePDF(inputURL: URL) async throws -> URL {
+        print("Opening PDF at:", inputURL.path)
+        print("Exists:", FileManager.default.fileExists(atPath: inputURL.path))
+        print("Readable:", FileManager.default.isReadableFile(atPath: inputURL.path))
         guard let doc = PDFDocument(url: inputURL) else { throw ColorizeError.cannotOpenPDF }
 
         let outDoc = PDFDocument()
