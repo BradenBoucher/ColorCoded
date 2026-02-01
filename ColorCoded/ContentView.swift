@@ -100,9 +100,14 @@ struct ContentView: View {
             switch result {
             case .success(let urls):
                 guard let url = urls.first else { return }
-                pickedPDFURL = url
-                coloredPDFURL = nil
-                status = "Loaded PDF. Ready to colorize offline."
+                do {
+                    let localURL = try FileImportHelper.copyToSandbox(url)
+                    pickedPDFURL = localURL
+                    coloredPDFURL = nil
+                    status = "Loaded PDF. Ready to colorize offline."
+                } catch {
+                    status = "Failed: \(error.localizedDescription)"
+                }
             case .failure(let error):
                 status = "Import failed: \(error.localizedDescription)"
             }

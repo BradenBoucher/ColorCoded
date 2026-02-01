@@ -1,15 +1,10 @@
 import Foundation
 import PDFKit
-import Vision
+import CoreGraphics
+@preconcurrency import Vision
 
 #if canImport(UIKit)
 import UIKit
-public typealias PlatformImage = UIImage
-public typealias PlatformColor = UIColor
-#elseif canImport(AppKit)
-import AppKit
-public typealias PlatformImage = NSImage
-public typealias PlatformColor = NSColor
 #endif
 
 
@@ -30,26 +25,51 @@ enum OfflineScoreColorizer {
     }
 
     static func colorizePDF(inputURL: URL) async throws -> URL {
+        print("Opening PDF at:", inputURL.path)
+        print("Exists:", FileManager.default.fileExists(atPath: inputURL.path))
+        print("Readable:", FileManager.default.isReadableFile(atPath: inputURL.path))
         guard let doc = PDFDocument(url: inputURL) else { throw ColorizeError.cannotOpenPDF }
 
         let outDoc = PDFDocument()
 
         for pageIndex in 0..<doc.pageCount {
-            guard let page = doc.page(at: pageIndex) else { continue }
+            try await withCheckedThrowingContinuation { continuation in
+                autoreleasepool {
+                    guard let page = doc.page(at: pageIndex) else {
+                        continuation.resume(returning: ())
+                        return
+                    }
 
-            guard let image = render(page: page, scale: 3.0) else {
-                throw ColorizeError.cannotRenderPage
-            }
+                    guard let image = render(page: page, scale: 2.0) else {
+                        continuation.resume(throwing: ColorizeError.cannotRenderPage)
+                        return
+                    }
 
-            // Detect staff model + noteheads
-            let staffModel = await StaffDetector.detectStaff(in: image)
-            let noteheads = await NoteheadDetector.detectNoteheads(in: image)
+                    Task {
+                        let staffModel = await StaffDetector.detectStaff(in: image)
+                        guard let cgImage = image.cgImageSafe else {
+                            continuation.resume(returning: ())
+                            return
+                        }
+                        let noteheadImage: CGImage
+                        if let staffModel {
+                            noteheadImage = StaffLineEraser.eraseStaffLines(in: cgImage, staff: staffModel) ?? cgImage
+                        } else {
+                            noteheadImage = cgImage
+                        }
+                        let noteheads = await NoteheadDetector.detectNoteheads(
+                            in: noteheadImage,
+                            imageSize: image.size
+                        )
 
-            // Draw overlays
-            let colored = drawOverlays(on: image, staff: staffModel, noteheads: noteheads)
+                        let colored = drawOverlays(on: image, staff: staffModel, noteheads: noteheads)
 
-            if let pdfPage = PDFPage(image: colored) {
-                outDoc.insert(pdfPage, at: outDoc.pageCount)
+                        if let pdfPage = PDFPage(image: colored) {
+                            outDoc.insert(pdfPage, at: outDoc.pageCount)
+                        }
+                        continuation.resume(returning: ())
+                    }
+                }
             }
         }
 
@@ -62,17 +82,34 @@ enum OfflineScoreColorizer {
 
     // MARK: - Render PDF page to UIImage
 
-    private static func render(page: PDFPage, scale: CGFloat) -> UIImage? {
+    private static func render(page: PDFPage, scale: CGFloat) -> PlatformImage? {
         let bounds = page.bounds(for: .mediaBox)
-        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
 
-        let renderer = UIGraphicsImageRenderer(size: size)
+        let maxLongSide: CGFloat = 2200
+        let baseW = bounds.width
+        let baseH = bounds.height
+
+        var s = scale
+        let longSide = max(baseW, baseH) * s
+        if longSide > maxLongSide {
+            s *= (maxLongSide / longSide)
+        }
+
+        s = max(1.0, s)
+
+        let size = CGSize(width: baseW * s, height: baseH * s)
+
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = true
+        format.scale = 1.0
+
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
         return renderer.image { ctx in
             UIColor.white.setFill()
             ctx.fill(CGRect(origin: .zero, size: size))
 
             ctx.cgContext.saveGState()
-            ctx.cgContext.scaleBy(x: scale, y: scale)
+            ctx.cgContext.scaleBy(x: s, y: s)
 
             // PDFKit uses a flipped coordinate system; adjust
             ctx.cgContext.translateBy(x: 0, y: bounds.height)
@@ -85,9 +122,9 @@ enum OfflineScoreColorizer {
 
     // MARK: - Draw overlays
 
-    private static func drawOverlays(on image: UIImage,
+    private static func drawOverlays(on image: PlatformImage,
                                      staff: StaffModel?,
-                                     noteheads: [CGRect]) -> UIImage {
+                                     noteheads: [CGRect]) -> PlatformImage {
         let renderer = UIGraphicsImageRenderer(size: image.size)
         return renderer.image { ctx in
             image.draw(at: .zero)
