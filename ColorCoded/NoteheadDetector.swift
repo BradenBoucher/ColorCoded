@@ -1,45 +1,36 @@
 import Foundation
 import PDFKit
-import Vision
-
-#if canImport(UIKit)
-import UIKit
-public typealias PlatformImage = UIImage
-public typealias PlatformColor = UIColor
-#elseif canImport(AppKit)
-import AppKit
-public typealias PlatformImage = NSImage
-public typealias PlatformColor = NSColor
-#endif
+@preconcurrency import Vision
 
 
 enum NoteheadDetector {
 
-    static func detectNoteheads(in image: UIImage) async -> [CGRect] {
-        guard let cg = image.cgImage else { return [] }
+    static func detectNoteheads(in image: PlatformImage) async -> [CGRect] {
+        guard let cg = image.cgImageSafe else { return [] }
+        let imageSize = image.size
 
         return await withCheckedContinuation { continuation in
-            let request = VNDetectContoursRequest { req, err in
-                guard err == nil else {
-                    continuation.resume(returning: [])
-                    return
-                }
-
-                guard let obs = req.results?.first as? VNContoursObservation else {
-                    continuation.resume(returning: [])
-                    return
-                }
-
-                let boxes = extractEllipseLikeBoxes(from: obs, imageSize: image.size)
-                continuation.resume(returning: nonMaxSuppression(boxes, iouThreshold: 0.35))
-            }
-
-            request.contrastAdjustment = 1.0
-            request.detectsDarkOnLight = true
-
-            let handler = VNImageRequestHandler(cgImage: cg, orientation: .up, options: [:])
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
+                    let request = VNDetectContoursRequest { req, err in
+                        guard err == nil else {
+                            continuation.resume(returning: [])
+                            return
+                        }
+
+                        guard let obs = req.results?.first as? VNContoursObservation else {
+                            continuation.resume(returning: [])
+                            return
+                        }
+
+                        let boxes = extractEllipseLikeBoxes(from: obs, imageSize: imageSize)
+                        continuation.resume(returning: nonMaxSuppression(boxes, iouThreshold: 0.35))
+                    }
+
+                    request.contrastAdjustment = 1.0
+                    request.detectsDarkOnLight = true
+
+                    let handler = VNImageRequestHandler(cgImage: cg, orientation: .up, options: [:])
                     try handler.perform([request])
                 } catch {
                     continuation.resume(returning: [])
@@ -53,7 +44,7 @@ enum NoteheadDetector {
         var out: [CGRect] = []
 
         // Pull top-level contours and child contours; noteheads often appear as small closed shapes.
-        let all = (0..<obs.contourCount).compactMap { obs.contour(at: $0) }
+        let all = (0..<obs.contourCount).compactMap { try? obs.contour(at: $0) }
 
         for c in all {
             // VNContour points are normalized (0..1). Convert to image coords.
