@@ -32,21 +32,30 @@ enum OfflineScoreColorizer {
         let outDoc = PDFDocument()
 
         for pageIndex in 0..<doc.pageCount {
-            guard let page = doc.page(at: pageIndex) else { continue }
+            try await withCheckedThrowingContinuation { continuation in
+                autoreleasepool {
+                    guard let page = doc.page(at: pageIndex) else {
+                        continuation.resume(returning: ())
+                        return
+                    }
 
-            guard let image = render(page: page, scale: 3.0) else {
-                throw ColorizeError.cannotRenderPage
-            }
+                    guard let image = render(page: page, scale: 2.0) else {
+                        continuation.resume(throwing: ColorizeError.cannotRenderPage)
+                        return
+                    }
 
-            // Detect staff model + noteheads
-            let staffModel = await StaffDetector.detectStaff(in: image)
-            let noteheads = await NoteheadDetector.detectNoteheads(in: image)
+                    Task {
+                        let staffModel = await StaffDetector.detectStaff(in: image)
+                        let noteheads = await NoteheadDetector.detectNoteheads(in: image)
 
-            // Draw overlays
-            let colored = drawOverlays(on: image, staff: staffModel, noteheads: noteheads)
+                        let colored = drawOverlays(on: image, staff: staffModel, noteheads: noteheads)
 
-            if let pdfPage = PDFPage(image: colored) {
-                outDoc.insert(pdfPage, at: outDoc.pageCount)
+                        if let pdfPage = PDFPage(image: colored) {
+                            outDoc.insert(pdfPage, at: outDoc.pageCount)
+                        }
+                        continuation.resume(returning: ())
+                    }
+                }
             }
         }
 
@@ -61,15 +70,32 @@ enum OfflineScoreColorizer {
 
     private static func render(page: PDFPage, scale: CGFloat) -> PlatformImage? {
         let bounds = page.bounds(for: .mediaBox)
-        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
 
-        let renderer = UIGraphicsImageRenderer(size: size)
+        let maxLongSide: CGFloat = 2200
+        let baseW = bounds.width
+        let baseH = bounds.height
+
+        var s = scale
+        let longSide = max(baseW, baseH) * s
+        if longSide > maxLongSide {
+            s *= (maxLongSide / longSide)
+        }
+
+        s = max(1.0, s)
+
+        let size = CGSize(width: baseW * s, height: baseH * s)
+
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = true
+        format.scale = 1.0
+
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
         return renderer.image { ctx in
             UIColor.white.setFill()
             ctx.fill(CGRect(origin: .zero, size: size))
 
             ctx.cgContext.saveGState()
-            ctx.cgContext.scaleBy(x: scale, y: scale)
+            ctx.cgContext.scaleBy(x: s, y: s)
 
             // PDFKit uses a flipped coordinate system; adjust
             ctx.cgContext.translateBy(x: 0, y: bounds.height)

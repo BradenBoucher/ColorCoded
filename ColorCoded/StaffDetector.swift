@@ -122,6 +122,10 @@ private extension CGImage {
     func horizontalInkProjection() -> [Int]? {
         let w = self.width
         let h = self.height
+        let pixelCount = w * h
+        if pixelCount > 8_000_000 {
+            return nil
+        }
 
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         var data = [UInt8](repeating: 0, count: w * h * 4)
