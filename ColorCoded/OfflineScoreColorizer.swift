@@ -1,6 +1,5 @@
 import Foundation
 import PDFKit
-import CoreGraphics
 @preconcurrency import Vision
 
 #if canImport(UIKit)
@@ -47,20 +46,7 @@ enum OfflineScoreColorizer {
 
                     Task {
                         let staffModel = await StaffDetector.detectStaff(in: image)
-                        guard let cgImage = image.cgImageSafe else {
-                            continuation.resume(returning: ())
-                            return
-                        }
-                        let noteheadImage: CGImage
-                        if let staffModel {
-                            noteheadImage = StaffLineEraser.eraseStaffLines(in: cgImage, staff: staffModel) ?? cgImage
-                        } else {
-                            noteheadImage = cgImage
-                        }
-                        let noteheads = await NoteheadDetector.detectNoteheads(
-                            in: noteheadImage,
-                            imageSize: image.size
-                        )
+                        let noteheads = await NoteheadDetector.detectNoteheads(in: image)
 
                         let colored = drawOverlays(on: image, staff: staffModel, noteheads: noteheads)
 

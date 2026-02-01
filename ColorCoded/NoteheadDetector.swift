@@ -1,10 +1,13 @@
 import Foundation
+import PDFKit
 @preconcurrency import Vision
 
 
 enum NoteheadDetector {
 
-    static func detectNoteheads(in image: CGImage, imageSize: CGSize) async -> [CGRect] {
+    static func detectNoteheads(in image: PlatformImage) async -> [CGRect] {
+        guard let cg = image.cgImageSafe else { return [] }
+        let imageSize = image.size
 
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -21,15 +24,13 @@ enum NoteheadDetector {
                         }
 
                         let boxes = extractEllipseLikeBoxes(from: obs, imageSize: imageSize)
-                        let split = splitMergedBoxes(boxes)
-                        continuation.resume(returning: nonMaxSuppression(split, iouThreshold: 0.35))
+                        continuation.resume(returning: nonMaxSuppression(boxes, iouThreshold: 0.35))
                     }
 
                     request.contrastAdjustment = 1.0
                     request.detectsDarkOnLight = true
 
-                    let processed = ImagePreprocessor.preprocessForContours(image) ?? image
-                    let handler = VNImageRequestHandler(cgImage: processed, orientation: .up, options: [:])
+                    let handler = VNImageRequestHandler(cgImage: cg, orientation: .up, options: [:])
                     try handler.perform([request])
                 } catch {
                     continuation.resume(returning: [])
