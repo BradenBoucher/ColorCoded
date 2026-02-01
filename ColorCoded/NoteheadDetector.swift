@@ -29,8 +29,8 @@ enum NoteheadDetector {
                         // Split merged blobs
                         let split = splitMergedBoxes(boxes, cgImage: cg)
 
-                        // NMS to reduce duplicates
-                        let out = nonMaxSuppression(split, iouThreshold: 0.35)
+                        // NMS to reduce duplicates (keep close notes)
+                        let out = nonMaxSuppression(split, iouThreshold: 0.90)
 
                         continuation.resume(returning: out)
                     }
@@ -93,7 +93,7 @@ enum NoteheadDetector {
         for b in sorted {
             var shouldKeep = true
             for k in kept {
-                if iou(b, k) > iouThreshold {
+                if iou(b, k) > iouThreshold && centersAreNear(b, k) {
                     shouldKeep = false
                     break
                 }
@@ -101,6 +101,14 @@ enum NoteheadDetector {
             if shouldKeep { kept.append(b) }
         }
         return kept
+    }
+
+    private static func centersAreNear(_ a: CGRect, _ b: CGRect) -> Bool {
+        let dx = a.midX - b.midX
+        let dy = a.midY - b.midY
+        let dist = sqrt(dx * dx + dy * dy)
+        let minDim = min(min(a.width, a.height), min(b.width, b.height))
+        return dist < max(2.0, minDim * 0.35)
     }
 
     private static func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
@@ -117,7 +125,7 @@ enum NoteheadDetector {
         out.reserveCapacity(boxes.count * 2)
 
         for box in boxes {
-            out.append(contentsOf: NoteBlobSplitter.splitIfNeeded(rect: box, cg: cgImage, maxSplits: 4))
+            out.append(contentsOf: NoteBlobSplitter.splitIfNeeded(rect: box, cg: cgImage, maxSplits: 6))
         }
 
         return out
