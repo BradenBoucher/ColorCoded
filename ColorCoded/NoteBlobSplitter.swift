@@ -98,7 +98,7 @@ enum NoteBlobSplitter {
         }
 
         // Dedupe peaks less aggressively so close noteheads don't merge
-        peaks = dedupePeaks(peaks, minDistance: max(4, Int(Double(w) * 0.08)))
+        peaks = dedupePeaks(peaks, minDistance: max(3, Int(Double(w) * 0.05)))
 
         // If we found 2+ peaks, split using peaks
         if peaks.count >= 2 {
