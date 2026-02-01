@@ -24,45 +24,76 @@ enum PitchClass: CaseIterable {
 
 enum PitchClassifier {
 
+    /// Classify by staff + clef anchor.
+    /// - Treble: bottom line = E
+    /// - Bass: bottom line = G
     static func classify(noteCenterY: CGFloat, staff: StaffModel?) -> PitchClass {
-        guard let staff, let closest = closestStaff(to: noteCenterY, staves: staff.staves) else {
-            // Fallback: stable cycling by vertical position
-            let idx = Int((noteCenterY / 20).rounded(.down)) % PitchClass.allCases.count
+        guard let staff, !staff.staves.isEmpty else {
+            let idx = Int((noteCenterY / 18).rounded(.down)) % PitchClass.allCases.count
             return PitchClass.allCases[abs(idx)]
         }
 
-        // Treble-clef approximation:
-        // Use the middle line (3rd line in 5) as reference: B4.
-        let lines = closest.sorted() // 5 y positions top->bottom (image coords)
-        if lines.count != 5 {
-            let idx = Int((noteCenterY / 20).rounded(.down)) % PitchClass.allCases.count
+        guard let (lines, staffIndex) = closestStaff(to: noteCenterY, staves: staff.staves) else {
+            let idx = Int((noteCenterY / 18).rounded(.down)) % PitchClass.allCases.count
+            return PitchClass.allCases[abs(idx)]
+        }
+
+        let sortedLines = lines.sorted() // y positions top->bottom in image coords
+        guard sortedLines.count == 5 else {
+            let idx = Int((noteCenterY / 18).rounded(.down)) % PitchClass.allCases.count
             return PitchClass.allCases[abs(idx)]
         }
 
         let spacing = max(6, staff.lineSpacing)
-        let middleLineY = lines[2]
+        let halfStep = spacing / 2.0
 
-        // Each "step" is half a line spacing (line<->space).
-        let stepsFromB = Int(((middleLineY - noteCenterY) / (spacing / 2)).rounded())
+        // Anchor at bottom line (line 5)
+        let bottomLineY = sortedLines[4]
 
-        // B is index 1 in A,B,C,... but we want pitch class modulo 7
-        // Sequence upward from B: B,C,D,E,F,G,A,B...
-        let order: [PitchClass] = [.B, .C, .D, .E, .F, .G, .A]
-        let idx = mod(stepsFromB, 7)
-        return order[idx]
+        let stepsUp = Int(((bottomLineY - noteCenterY) / halfStep).rounded())
+
+        let clef: Clef = {
+            if staff.staves.count >= 2 {
+                return (staffIndex == 0) ? .treble : .bass
+            } else {
+                return .treble
+            }
+        }()
+
+        return pitchFromBottomLine(stepsUp: stepsUp, clef: clef)
     }
 
-    private static func closestStaff(to y: CGFloat, staves: [[CGFloat]]) -> [CGFloat]? {
-        guard !staves.isEmpty else { return nil }
-        var best: ([CGFloat], CGFloat)? = nil
-        for staff in staves {
-            guard let center = staff.sorted().dropFirst().dropLast().first else { continue }
-            let dist = abs(center - y)
-            if best == nil || dist < best!.1 {
-                best = (staff, dist)
+    // MARK: - Internals
+
+    private enum Clef { case treble, bass }
+
+    /// Treble bottom line is E; Bass bottom line is G.
+    private static func pitchFromBottomLine(stepsUp: Int, clef: Clef) -> PitchClass {
+        let trebleSequence: [PitchClass] = [.E, .F, .G, .A, .B, .C, .D]
+        let bassSequence: [PitchClass] = [.G, .A, .B, .C, .D, .E, .F]
+
+        let seq = (clef == .treble) ? trebleSequence : bassSequence
+        let idx = mod(stepsUp, 7)
+        return seq[idx]
+    }
+
+    private static func closestStaff(to y: CGFloat, staves: [[CGFloat]]) -> ([CGFloat], Int)? {
+        var bestIndex: Int?
+        var bestDist: CGFloat = .greatestFiniteMagnitude
+
+        for (i, staffLines) in staves.enumerated() {
+            let sorted = staffLines.sorted()
+            guard sorted.count == 5 else { continue }
+            let centerY = (sorted.first! + sorted.last!) / 2.0
+            let d = abs(centerY - y)
+            if d < bestDist {
+                bestDist = d
+                bestIndex = i
             }
         }
-        return best?.0
+
+        guard let idx = bestIndex else { return nil }
+        return (staves[idx], idx)
     }
 
     private static func mod(_ a: Int, _ n: Int) -> Int {
