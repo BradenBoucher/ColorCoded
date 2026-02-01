@@ -1,15 +1,9 @@
 import Foundation
 import PDFKit
-import Vision
+@preconcurrency import Vision
 
 #if canImport(UIKit)
 import UIKit
-public typealias PlatformImage = UIImage
-public typealias PlatformColor = UIColor
-#elseif canImport(AppKit)
-import AppKit
-public typealias PlatformImage = NSImage
-public typealias PlatformColor = NSColor
 #endif
 
 
@@ -62,7 +56,7 @@ enum OfflineScoreColorizer {
 
     // MARK: - Render PDF page to UIImage
 
-    private static func render(page: PDFPage, scale: CGFloat) -> UIImage? {
+    private static func render(page: PDFPage, scale: CGFloat) -> PlatformImage? {
         let bounds = page.bounds(for: .mediaBox)
         let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
 
@@ -85,9 +79,9 @@ enum OfflineScoreColorizer {
 
     // MARK: - Draw overlays
 
-    private static func drawOverlays(on image: UIImage,
+    private static func drawOverlays(on image: PlatformImage,
                                      staff: StaffModel?,
-                                     noteheads: [CGRect]) -> UIImage {
+                                     noteheads: [CGRect]) -> PlatformImage {
         let renderer = UIGraphicsImageRenderer(size: image.size)
         return renderer.image { ctx in
             image.draw(at: .zero)

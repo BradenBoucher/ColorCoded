@@ -1,29 +1,23 @@
 import Foundation
-import PDFKit
-import Vision
 
 #if canImport(UIKit)
 import UIKit
-public typealias PlatformImage = UIImage
-public typealias PlatformColor = UIColor
 #elseif canImport(AppKit)
 import AppKit
-public typealias PlatformImage = NSImage
-public typealias PlatformColor = NSColor
 #endif
 
 enum PitchClass: CaseIterable {
     case A, B, C, D, E, F, G
 
-    var color: UIColor {
+    var color: PlatformColor {
         switch self {
-        case .A: return UIColor(red: 1.0, green: 0.0, blue: 0.0, alpha: 1.0)        // red
-        case .B: return UIColor(red: 1.0, green: 0.5, blue: 0.0, alpha: 1.0)        // orange
-        case .C: return UIColor(red: 1.0, green: 0.9, blue: 0.0, alpha: 1.0)        // yellow
-        case .D: return UIColor(red: 0.0, green: 0.85, blue: 0.2, alpha: 1.0)       // green
-        case .E: return UIColor(red: 0.0, green: 0.4, blue: 1.0, alpha: 1.0)        // blue
-        case .F: return UIColor(red: 0.29, green: 0.0, blue: 0.51, alpha: 1.0)      // indigo
-        case .G: return UIColor(red: 0.55, green: 0.0, blue: 1.0, alpha: 1.0)       // violet
+        case .A: return PlatformColor(red: 1.0, green: 0.0, blue: 0.0, alpha: 1.0)        // red
+        case .B: return PlatformColor(red: 1.0, green: 0.5, blue: 0.0, alpha: 1.0)        // orange
+        case .C: return PlatformColor(red: 1.0, green: 0.9, blue: 0.0, alpha: 1.0)        // yellow
+        case .D: return PlatformColor(red: 0.0, green: 0.85, blue: 0.2, alpha: 1.0)       // green
+        case .E: return PlatformColor(red: 0.0, green: 0.4, blue: 1.0, alpha: 1.0)        // blue
+        case .F: return PlatformColor(red: 0.29, green: 0.0, blue: 0.51, alpha: 1.0)      // indigo
+        case .G: return PlatformColor(red: 0.55, green: 0.0, blue: 1.0, alpha: 1.0)       // violet
         }
     }
 }
