@@ -118,9 +118,11 @@ enum OfflineScoreColorizer {
             // Slightly transparent so we still see the note glyph
             ctx.cgContext.setAlpha(0.85)
 
+            let baseRadius = max(6.0, (staff?.lineSpacing ?? 12.0) * 0.75)
+
             for rect in noteheads {
                 let center = CGPoint(x: rect.midX, y: rect.midY)
-                let radius = max(rect.width, rect.height) * 0.85
+                let radius = baseRadius
 
                 let pitchClass = PitchClassifier.classify(noteCenterY: center.y,
                                                           staff: staff)

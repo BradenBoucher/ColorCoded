@@ -29,8 +29,8 @@ enum NoteheadDetector {
                         // Split merged blobs
                         let split = splitMergedBoxes(boxes, cgImage: cg)
 
-                        // NMS to reduce duplicates
-                        let out = nonMaxSuppression(split, iouThreshold: 0.35)
+                        // NMS to reduce duplicates (keep close notes)
+                        let out = nonMaxSuppression(split, iouThreshold: 0.85)
 
                         continuation.resume(returning: out)
                     }
@@ -117,7 +117,7 @@ enum NoteheadDetector {
         out.reserveCapacity(boxes.count * 2)
 
         for box in boxes {
-            out.append(contentsOf: NoteBlobSplitter.splitIfNeeded(rect: box, cg: cgImage, maxSplits: 4))
+            out.append(contentsOf: NoteBlobSplitter.splitIfNeeded(rect: box, cg: cgImage, maxSplits: 6))
         }
 
         return out
