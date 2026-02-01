@@ -56,7 +56,7 @@ enum NoteBlobSplitter {
         let maxVal = smoothed.max() ?? 0
         guard maxVal > 0 else { return [croppedRect] }
 
-        let peakMin = max(3, Int(Double(maxVal) * 0.35))
+        let peakMin = max(3, Int(Double(maxVal) * 0.45))
 
         var peaks: [Int] = []
         var x = 1
@@ -79,7 +79,7 @@ enum NoteBlobSplitter {
             }
         }
 
-        peaks = dedupePeaks(peaks, minDistance: max(4, Int(Double(w) * 0.08)))
+        peaks = dedupePeaks(peaks, minDistance: max(6, Int(Double(w) * 0.12)))
         if peaks.count <= 1 { return [croppedRect] }
 
         if peaks.count > maxSplits {

@@ -25,8 +25,8 @@ enum NoteheadDetector {
                         }
 
                         let boxes = extractEllipseLikeBoxes(from: obs, imageSize: imageSize)
-                        let split = splitMergedBoxes(boxes, cgImage: processed)
-                        continuation.resume(returning: nonMaxSuppression(split, iouThreshold: 0.7))
+                        let split = splitMergedBoxes(boxes, cgImage: cg)
+                        continuation.resume(returning: nonMaxSuppression(split, iouThreshold: 0.35))
                     }
 
                     request.contrastAdjustment = 1.0
