@@ -111,8 +111,8 @@ enum NoteBlobSplitter {
         let estSingle = max(10.0, croppedRect.height * 0.85)
         let expectedCount = Int((croppedRect.width / estSingle).rounded())
 
-        // If it looks like 3 noteheads wide, force 3-way split even if peaks were weak
-        if expectedCount >= 3 {
+        // If it looks like multiple noteheads wide, force split even if peaks were weak
+        if expectedCount >= 2 {
             let n = min(maxSplits, expectedCount)
             let forcedCenters = (0..<n).map { i in
                 Int((Double(w) * (Double(i) + 0.5) / Double(n)).rounded())
