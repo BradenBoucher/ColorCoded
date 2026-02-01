@@ -1,13 +1,14 @@
 import Foundation
-import PDFKit
 @preconcurrency import Vision
-
+import CoreGraphics
 
 enum NoteheadDetector {
 
     static func detectNoteheads(in image: PlatformImage) async -> [CGRect] {
         guard let cg = image.cgImageSafe else { return [] }
-        let imageSize = image.size
+
+        // Use CGImage dimensions so we don't depend on UIKit/AppKit .size
+        let imageSize = CGSize(width: cg.width, height: cg.height)
 
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -23,12 +24,18 @@ enum NoteheadDetector {
                             return
                         }
 
-                        let boxes = extractEllipseLikeBoxes(from: obs, imageSize: imageSize)
+                        let boxes = extractCandidateBoxes(from: obs, imageSize: imageSize)
+
+                        // Split merged blobs
                         let split = splitMergedBoxes(boxes, cgImage: cg)
-                        continuation.resume(returning: nonMaxSuppression(split, iouThreshold: 0.35))
+
+                        // NMS to reduce duplicates
+                        let out = nonMaxSuppression(split, iouThreshold: 0.35)
+
+                        continuation.resume(returning: out)
                     }
 
-                    request.contrastAdjustment = 1.0
+                    request.contrastAdjustment = 1.2
                     request.detectsDarkOnLight = true
 
                     let handler = VNImageRequestHandler(cgImage: cg, orientation: .up, options: [:])
@@ -40,34 +47,38 @@ enum NoteheadDetector {
         }
     }
 
-    private static func extractEllipseLikeBoxes(from obs: VNContoursObservation,
-                                               imageSize: CGSize) -> [CGRect] {
+    /// Very recall-heavy candidate extraction.
+    /// We let splitter + NMS handle cleanup.
+    private static func extractCandidateBoxes(from obs: VNContoursObservation,
+                                             imageSize: CGSize) -> [CGRect] {
         var out: [CGRect] = []
+        out.reserveCapacity(obs.contourCount)
 
-        // Pull top-level contours and child contours; noteheads often appear as small closed shapes.
         let all = (0..<obs.contourCount).compactMap { try? obs.contour(at: $0) }
 
         for c in all {
-            // VNContour points are normalized (0..1). Convert to image coords.
             let boxN = c.normalizedPath.boundingBox
 
-            // Convert to UIKit coords (Vision origin is lower-left)
-            let box = CGRect(
+            // Vision origin is lower-left; convert to image coords (top-left origin)
+            var box = CGRect(
                 x: boxN.origin.x * imageSize.width,
                 y: (1 - boxN.origin.y - boxN.size.height) * imageSize.height,
                 width: boxN.size.width * imageSize.width,
                 height: boxN.size.height * imageSize.height
             )
 
-            // Heuristics: notehead-ish size (looser to keep recall high)
-            if box.width < 4 || box.height < 4 { continue }
-            if box.width > 90 || box.height > 90 { continue }
+            // Basic sanity
+            if box.width < 3 || box.height < 3 { continue }
+            if box.width > 140 || box.height > 140 { continue }
 
-            // Heuristic: oval-ish aspect ratio, but allow wider for merged noteheads
+            // Allow broad aspect ratio (merged blobs can be wide)
             let ar = box.width / max(1, box.height)
-            if ar < 0.4 || ar > 3.5 { continue }
+            if ar < 0.25 || ar > 6.0 { continue }
 
-            out.append(box.insetBy(dx: -1, dy: -1))
+            // Inflate slightly
+            box = box.insetBy(dx: -2, dy: -2)
+
+            out.append(box)
         }
 
         return out
@@ -76,7 +87,6 @@ enum NoteheadDetector {
     // MARK: - NMS
 
     private static func nonMaxSuppression(_ boxes: [CGRect], iouThreshold: CGFloat) -> [CGRect] {
-        // simple: keep larger boxes first
         let sorted = boxes.sorted { ($0.width * $0.height) > ($1.width * $1.height) }
         var kept: [CGRect] = []
 
@@ -104,10 +114,10 @@ enum NoteheadDetector {
     private static func splitMergedBoxes(_ boxes: [CGRect], cgImage: CGImage) -> [CGRect] {
         guard !boxes.isEmpty else { return [] }
         var out: [CGRect] = []
-        out.reserveCapacity(boxes.count)
+        out.reserveCapacity(boxes.count * 2)
 
         for box in boxes {
-            out.append(contentsOf: NoteBlobSplitter.splitIfNeeded(rect: box, cg: cgImage))
+            out.append(contentsOf: NoteBlobSplitter.splitIfNeeded(rect: box, cg: cgImage, maxSplits: 4))
         }
 
         return out
