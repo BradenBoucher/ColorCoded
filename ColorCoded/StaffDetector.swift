@@ -1,16 +1,6 @@
 import Foundation
 import PDFKit
-import Vision
-
-#if canImport(UIKit)
-import UIKit
-public typealias PlatformImage = UIImage
-public typealias PlatformColor = UIColor
-#elseif canImport(AppKit)
-import AppKit
-public typealias PlatformImage = NSImage
-public typealias PlatformColor = NSColor
-#endif
+@preconcurrency import Vision
 
 
 struct StaffModel {
@@ -22,8 +12,8 @@ struct StaffModel {
 
 enum StaffDetector {
 
-    static func detectStaff(in image: UIImage) async -> StaffModel? {
-        guard let cg = image.cgImage else { return nil }
+    static func detectStaff(in image: PlatformImage) async -> StaffModel? {
+        guard let cg = image.cgImageSafe else { return nil }
 
         // Downscale for speed
         let targetW = 900
@@ -79,32 +69,26 @@ enum StaffDetector {
     }
 
     private static func groupIntoStaves(ys: [CGFloat]) -> [[CGFloat]] {
-        // Greedy grouping into chunks of 5 with roughly consistent spacing
         let sorted = ys.sorted()
         var staves: [[CGFloat]] = []
-        var current: [CGFloat] = []
 
-        for y in sorted {
-            if current.isEmpty {
-                current = [y]
-                continue
-            }
+        var i = 0
+        while i + 4 < sorted.count {
+            let candidate = Array(sorted[i...(i + 4)])
 
-            // Accept if it's not ridiculously far from previous line
-            let dy = y - current.last!
-            if dy < 80 { // heuristic
-                current.append(y)
-                if current.count == 5 {
-                    staves.append(current)
-                    current = []
-                }
+            let diffs = zip(candidate.dropFirst(), candidate).map { $0 - $1 }
+            let med = diffs.sorted()[diffs.count / 2]
+            let tolerance = max(2.0, med * 0.20)
+            let ok = diffs.allSatisfy { abs($0 - med) < tolerance }
+
+            if ok {
+                staves.append(candidate)
+                i += 5
             } else {
-                // reset
-                current = [y]
+                i += 1
             }
         }
 
-        // If leftover lines, ignore.
         return staves
     }
 }
@@ -132,6 +116,10 @@ private extension CGImage {
     func horizontalInkProjection() -> [Int]? {
         let w = self.width
         let h = self.height
+        let pixelCount = w * h
+        if pixelCount > 8_000_000 {
+            return nil
+        }
 
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         var data = [UInt8](repeating: 0, count: w * h * 4)
