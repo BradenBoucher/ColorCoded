@@ -162,7 +162,10 @@ enum OfflineScoreColorizer {
                 return !systemZone.contains(center)
             }
 
-            let deduped = DuplicateSuppressor.suppress(withoutSymbols, spacing: system.spacing)
+            let scored = withoutSymbols.map { ScoredHead(rect: $0) }
+            let gated = StaffStepGate.filterCandidates(scored, system: system)
+            let gatedRects = gated.map { $0.rect }
+            let deduped = DuplicateSuppressor.suppress(gatedRects, spacing: system.spacing)
             filtered.append(contentsOf: deduped)
         }
 
@@ -225,4 +228,3 @@ enum OfflineScoreColorizer {
         }
     }
 }
-
