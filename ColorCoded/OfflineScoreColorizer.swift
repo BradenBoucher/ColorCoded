@@ -49,15 +49,11 @@ enum OfflineScoreColorizer {
                         let detection = await NoteheadDetector.detectDebug(in: image)
                         let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
                         let barlines = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
-                        let filteredNotes = filterNoteheads(detection.noteRects,
-                                                            systems: systems,
-                                                            barlines: barlines,
-                                                            fallbackSpacing: staffModel?.lineSpacing ?? 12.0)
 
                         let colored = drawOverlays(
                             on: image,
                             staff: staffModel,
-                            noteheads: filteredNotes,
+                            noteheads: detection.noteRects,
                             barlines: barlines
                         )
 
@@ -132,7 +128,7 @@ enum OfflineScoreColorizer {
         var consumed = Set<Int>()
 
         for system in systems {
-            let systemZone = symbolZone(for: system, barlines: barlines)
+            let systemZone = SystemDetector.symbolZone(for: system, barlines: barlines)
             let systemNotes = noteheads.enumerated().compactMap { index, rect -> CGRect? in
                 guard system.bbox.contains(CGPoint(x: rect.midX, y: rect.midY)) else { return nil }
                 consumed.insert(index)
@@ -157,24 +153,6 @@ enum OfflineScoreColorizer {
         }
 
         return filtered
-    }
-
-    private static func symbolZone(for system: SystemBlock, barlines: [CGRect]) -> CGRect {
-        let defaultWidth = system.spacing * 7.0
-        let systemBars = barlines
-            .filter { $0.intersects(system.bbox) }
-            .sorted { $0.minX < $1.minX }
-        if let first = systemBars.first {
-            let width = min(first.minX - system.bbox.minX, defaultWidth)
-            return CGRect(x: system.bbox.minX,
-                          y: system.bbox.minY,
-                          width: max(0, width),
-                          height: system.bbox.height)
-        }
-        return CGRect(x: system.bbox.minX,
-                      y: system.bbox.minY,
-                      width: defaultWidth,
-                      height: system.bbox.height)
     }
 
     private static func drawOverlays(on image: PlatformImage,
