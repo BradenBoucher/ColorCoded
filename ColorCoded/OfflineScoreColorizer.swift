@@ -133,8 +133,6 @@ enum OfflineScoreColorizer {
             return DuplicateSuppressor.suppress(noteheads, spacing: fallbackSpacing)
         }
 
-        let binary = cgImage.flatMap { BinaryImage(from: $0, threshold: 180) }
-
         var filtered: [CGRect] = []
         var consumed = Set<Int>()
 
