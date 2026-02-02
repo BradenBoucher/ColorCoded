@@ -191,17 +191,14 @@ enum NoteheadDetector {
 
         rowInk = smooth(rowInk, radius: 6)
 
-        // Band threshold: keep rows with ink above median (favor recall for debug)
+        // band threshold: keep rows with ink above median (favor recall for debug)
         let med = percentile(rowInk, p: 0.50)
-        let bandMin = max(6, Int(Double(med) * 1.35))
+        let bandMin = max(4, Int(Double(med) * 1.2))
 
-        let bands = findBands(rowInk, minVal: bandMin, minHeight: max(36, h / 22))
+        var bands = findBands(rowInk, minVal: bandMin, minHeight: max(24, h / 24))
         let usingFallbackBand = bands.isEmpty
-        let staffBands: [(Int, Int)]
         if usingFallbackBand {
-            staffBands = [(0, max(1, h - 1))]
-        } else {
-            staffBands = mergeBands(bands, gap: 14)
+            bands = [(0, max(1, h - 1))]
         }
 
         var out: [CGRect] = []
@@ -210,16 +207,45 @@ enum NoteheadDetector {
         for (y0, y1) in staffBands {
             let bandH = y1 - y0
             if bandH <= 0 { continue }
-            let pad = max(6, Int(Double(bandH) * 0.08))
-            let top = max(0, y0 - pad)
-            let bot = min(h - 1, y1 + pad)
-            let rect = CGRect(
-                x: 6,
-                y: CGFloat(top),
-                width: CGFloat(max(1, w - 12)),
-                height: CGFloat(bot - top)
-            )
-            if rect.height >= 24 {
+
+            var colInk = [Int](repeating: 0, count: w)
+
+            // sample every 2px vertically for speed
+            var y = y0
+            while y < y1 {
+                var x = 0
+                while x < w {
+                    let i = (y * w + x) * 4
+                    let lum = (Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2])) / 3
+                    if lum < threshold { colInk[x] += 1 }
+                    x += 1
+                }
+                y += 2
+            }
+
+            colInk = smooth(colInk, radius: 2)
+
+            let maxVal = colInk.max() ?? 0
+            if maxVal <= 0 { continue }
+
+            // Barline columns tend to be very strong vertically
+            let colMed = percentile(colInk, p: 0.50)
+            let barMinMultiplier = usingFallbackBand ? 1.8 : 2.2
+            let barMaxFrac = usingFallbackBand ? 0.40 : 0.48
+            let barMin = max(Int(Double(colMed) * barMinMultiplier), Int(Double(maxVal) * barMaxFrac))
+
+            // Find contiguous "hot" column runs
+            let runs = findRuns(colInk, minVal: barMin, minWidth: 2)
+
+            for r in runs {
+                let x0 = CGFloat(r.lowerBound)
+                let x1 = CGFloat(r.upperBound)
+                let rect = CGRect(
+                    x: x0 - 1,
+                    y: CGFloat(y0) - 2,
+                    width: (x1 - x0) + 2,
+                    height: CGFloat((y1 - y0) + 4)
+                )
                 out.append(rect)
             }
         }
