@@ -202,9 +202,9 @@ enum NoteheadDetector {
         }
 
         var out: [CGRect] = []
-        out.reserveCapacity(staffBands.count)
+        out.reserveCapacity(bands.count)
 
-        for (y0, y1) in staffBands {
+        for (y0, y1) in bands {
             let bandH = y1 - y0
             if bandH <= 0 { continue }
 
@@ -290,6 +290,25 @@ enum NoteheadDetector {
             }
         }
         return out
+    }
+
+    private static func findRuns(_ values: [Int], minVal: Int, minWidth: Int) -> [Range<Int>] {
+        var ranges: [Range<Int>] = []
+        var i = 0
+        while i < values.count {
+            if values[i] >= minVal {
+                let start = i
+                var end = i
+                while end < values.count && values[end] >= minVal { end += 1 }
+                if end - start >= minWidth {
+                    ranges.append(start..<end)
+                }
+                i = end
+            } else {
+                i += 1
+            }
+        }
+        return ranges
     }
 
     // MARK: - Shared small helpers

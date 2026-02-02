@@ -47,12 +47,14 @@ enum OfflineScoreColorizer {
                     Task {
                         let staffModel = await StaffDetector.detectStaff(in: image)
                         let detection = await NoteheadDetector.detectDebug(in: image)
+                        let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
+                        let barlines = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
 
                         let colored = drawOverlays(
                             on: image,
                             staff: staffModel,
                             noteheads: detection.noteRects,
-                            barlines: detection.barlineRects
+                            barlines: barlines
                         )
 
                         if let pdfPage = PDFPage(image: colored) {
