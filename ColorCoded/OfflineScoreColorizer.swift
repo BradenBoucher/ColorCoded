@@ -115,6 +115,46 @@ enum OfflineScoreColorizer {
 
     // MARK: - Draw overlays
 
+    private static func filterNoteheads(_ noteheads: [CGRect],
+                                        systems: [SystemBlock],
+                                        barlines: [CGRect],
+                                        fallbackSpacing: CGFloat) -> [CGRect] {
+        guard !noteheads.isEmpty else { return [] }
+        guard !systems.isEmpty else {
+            return DuplicateSuppressor.suppress(noteheads, spacing: fallbackSpacing)
+        }
+
+        var filtered: [CGRect] = []
+        var consumed = Set<Int>()
+
+        for system in systems {
+            let systemZone = SystemDetector.symbolZone(for: system, barlines: barlines)
+            let systemNotes = noteheads.enumerated().compactMap { index, rect -> CGRect? in
+                guard system.bbox.contains(CGPoint(x: rect.midX, y: rect.midY)) else { return nil }
+                consumed.insert(index)
+                return rect
+            }
+
+            let withoutSymbols = systemNotes.filter { rect in
+                let center = CGPoint(x: rect.midX, y: rect.midY)
+                return !systemZone.contains(center)
+            }
+
+            let deduped = DuplicateSuppressor.suppress(withoutSymbols, spacing: system.spacing)
+            filtered.append(contentsOf: deduped)
+        }
+
+        if consumed.count < noteheads.count {
+            let remaining = noteheads.enumerated().compactMap { index, rect -> CGRect? in
+                guard !consumed.contains(index) else { return nil }
+                return rect
+            }
+            filtered.append(contentsOf: DuplicateSuppressor.suppress(remaining, spacing: fallbackSpacing))
+        }
+
+        return filtered
+    }
+
     private static func drawOverlays(on image: PlatformImage,
                                      staff: StaffModel?,
                                      noteheads: [CGRect],
