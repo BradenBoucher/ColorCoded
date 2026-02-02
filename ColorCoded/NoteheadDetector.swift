@@ -202,9 +202,9 @@ enum NoteheadDetector {
         }
 
         var out: [CGRect] = []
-        out.reserveCapacity(staffBands.count)
+        out.reserveCapacity(bands.count)
 
-        for (y0, y1) in staffBands {
+        for (y0, y1) in bands {
             let bandH = y1 - y0
             if bandH <= 0 { continue }
 
