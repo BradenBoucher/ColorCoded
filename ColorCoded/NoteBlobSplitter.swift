@@ -2,19 +2,15 @@ import CoreGraphics
 
 enum NoteBlobSplitter {
 
-    /// Split a wide candidate rect into multiple rects if multiple "ink peaks" exist.
-    /// Works best on a preprocessed (high contrast + staff-erased) CGImage.
-    static func splitIfNeeded(rect: CGRect, cg: CGImage, maxSplits: Int = 4) -> [CGRect] {
+    /// Split a candidate rect into multiple rects if multiple "ink peaks" exist.
+    /// Works best on a preprocessed (high contrast + staff-erased) CGImage,
+    /// but should still behave reasonably on raw images.
+    static func splitIfNeeded(rect: CGRect, cg: CGImage, maxSplits: Int = 6) -> [CGRect] {
 
         let imgW = CGFloat(cg.width)
         let imgH = CGFloat(cg.height)
         let croppedRect = rect.intersection(CGRect(x: 0, y: 0, width: imgW, height: imgH))
-        guard croppedRect.width >= 8, croppedRect.height >= 8 else { return [rect] }
-
-        // Only split if it looks "wide enough" to contain >1 notehead
-        if croppedRect.width < croppedRect.height * 1.25 {
-            return [croppedRect]
-        }
+        guard croppedRect.width >= 8, croppedRect.height >= 8 else { return [croppedRect] }
 
         guard let crop = cg.cropping(to: croppedRect.integral) else { return [croppedRect] }
 
@@ -36,101 +32,124 @@ enum NoteBlobSplitter {
 
         ctx.draw(crop, in: CGRect(x: 0, y: 0, width: w, height: h))
 
-        // ---- Vertical ink projection (count dark pixels per column) ----
-        var colInk = [Int](repeating: 0, count: w)
+        // NOTE:
+        // - Triads are often "TALL blobs" (multiple noteheads stacked in Y)
+        // - Chords can also be "WIDE blobs" (multiple noteheads in X)
+        //
+        // We'll attempt BOTH:
+        //   1) Wide split via column projection (existing idea)
+        //   2) Tall split via row projection (NEW — fixes triads)
 
-        // Slightly higher threshold catches hollow noteheads too
-        let threshold = 175
+        let threshold = 180 // slightly high; works for filled + hollow heads
+        let wideResult = trySplitWide(
+            croppedRect: croppedRect,
+            pixels: pixels,
+            w: w,
+            h: h,
+            threshold: threshold,
+            maxSplits: maxSplits
+        )
 
-        // Ignore top/bottom band to reduce stems/beams influence
-        let y0 = Int(Double(h) * 0.12)
-        let y1 = Int(Double(h) * 0.88)
+        if wideResult.count >= 2 { return wideResult }
 
-        for y in y0..<y1 {
-            for x in 0..<w {
-                let i = (y * w + x) * 4
-                let r = Int(pixels[i])
-                let g = Int(pixels[i + 1])
-                let b = Int(pixels[i + 2])
-                let lum = (r + g + b) / 3
-                if lum < threshold {
-                    colInk[x] += 1
+        let tallResult = trySplitTall(
+            croppedRect: croppedRect,
+            pixels: pixels,
+            w: w,
+            h: h,
+            threshold: threshold,
+            maxSplits: maxSplits
+        )
+
+        if tallResult.count >= 2 { return tallResult }
+
+        // Fallback: force split if geometry strongly suggests multiple noteheads
+        // (works for cases where projections are weak due to blur/light gray ink)
+        let ar = croppedRect.width / max(1, croppedRect.height)
+
+        // Estimate "single head size" ~ minDim * 0.9
+        let minDim = min(croppedRect.width, croppedRect.height)
+        let estSingle = max(10.0, minDim * 0.9)
+
+        if ar >= 1.25 {
+            let expected = Int((croppedRect.width / estSingle).rounded())
+            if expected >= 2 {
+                let n = min(maxSplits, expected)
+                let forcedCenters = (0..<n).map { i in
+                    Int((Double(w) * (Double(i) + 0.5) / Double(n)).rounded())
                 }
+                return splitRectsWide(from: forcedCenters, in: croppedRect, cropWidth: w)
+            }
+        } else if ar <= 0.80 {
+            let expected = Int((croppedRect.height / estSingle).rounded())
+            if expected >= 2 {
+                let n = min(maxSplits, expected)
+                let forcedCenters = (0..<n).map { i in
+                    Int((Double(h) * (Double(i) + 0.5) / Double(n)).rounded())
+                }
+                return splitRectsTall(from: forcedCenters, in: croppedRect, cropHeight: h)
             }
         }
 
-        // Smooth projection
-        var smoothed = smooth(colInk, radius: 3)
-
-        // Normalize small noise: subtract a small baseline (helps hollow noteheads)
-        let baseline = percentile(smoothed, p: 0.20)
-        if baseline > 0 {
-            for i in 0..<smoothed.count { smoothed[i] = max(0, smoothed[i] - baseline) }
-        }
-
-        let maxVal = smoothed.max() ?? 0
-        if maxVal <= 0 { return [croppedRect] }
-
-        // Adaptive threshold: based on median/max, not just max
-        let med = percentile(smoothed, p: 0.50)
-        let peakMin = max(2, Int(max(Double(med) * 1.4, Double(maxVal) * 0.28)))
-
-        // Find peaks
-        var peaks: [Int] = []
-        var x = 1
-        while x < w - 1 {
-            if smoothed[x] >= peakMin,
-               smoothed[x] >= smoothed[x - 1],
-               smoothed[x] >= smoothed[x + 1] {
-
-                // Walk across plateau and pick center
-                var left = x
-                var right = x
-                while left - 1 >= 0 && smoothed[left - 1] == smoothed[x] { left -= 1 }
-                while right + 1 < w && smoothed[right + 1] == smoothed[x] { right += 1 }
-                let best = (left + right) / 2
-
-                peaks.append(best)
-                x = right + 1
-            } else {
-                x += 1
-            }
-        }
-
-        // Dedupe peaks less aggressively so close noteheads don't merge
-        peaks = dedupePeaks(peaks, minDistance: max(3, Int(Double(w) * 0.05)))
-
-        // If we found 2+ peaks, split using peaks
-        if peaks.count >= 2 {
-            peaks = Array(peaks.prefix(maxSplits))
-            return splitRects(from: peaks, in: croppedRect, cropWidth: w)
-        }
-
-        // ---- Fallback: force split based on width if it strongly suggests multiple noteheads ----
-        // Estimate "single notehead width" ~ height*0.85 (vector render tends to match this)
-        let estSingle = max(10.0, croppedRect.height * 0.85)
-        let expectedCount = Int((croppedRect.width / estSingle).rounded())
-
-        // If it looks like multiple noteheads wide, force split even if peaks were weak
-        if expectedCount >= 2 {
-            let n = min(maxSplits, expectedCount)
-            let forcedCenters = (0..<n).map { i in
-                Int((Double(w) * (Double(i) + 0.5) / Double(n)).rounded())
-            }
-            return splitRects(from: forcedCenters, in: croppedRect, cropWidth: w)
-        }
-
-        // Otherwise keep as-is
         return [croppedRect]
     }
 
-    // MARK: - Splitting
+    // MARK: - Wide split (X)
 
-    private static func splitRects(from peakCols: [Int], in rect: CGRect, cropWidth: Int) -> [CGRect] {
+    private static func trySplitWide(
+        croppedRect: CGRect,
+        pixels: [UInt8],
+        w: Int,
+        h: Int,
+        threshold: Int,
+        maxSplits: Int
+    ) -> [CGRect] {
+
+        // Only attempt if it's plausibly wide or at least not extremely tall
+        if croppedRect.width < croppedRect.height * 1.10 { return [croppedRect] }
+
+        // Ignore top/bottom band to reduce beams/ties
+        let y0 = Int(Double(h) * 0.18)
+        let y1 = Int(Double(h) * 0.82)
+
+        var colInk = [Int](repeating: 0, count: w)
+        for y in y0..<y1 {
+            for x in 0..<w {
+                let i = (y * w + x) * 4
+                let lum = (Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2])) / 3
+                if lum < threshold { colInk[x] += 1 }
+            }
+        }
+
+        var sm = smooth(colInk, radius: 3)
+        let baseline = percentile(sm, p: 0.20)
+        if baseline > 0 {
+            for i in 0..<sm.count { sm[i] = max(0, sm[i] - baseline) }
+        }
+
+        let maxVal = sm.max() ?? 0
+        if maxVal <= 0 { return [croppedRect] }
+
+        let med = percentile(sm, p: 0.50)
+        let peakMin = max(2, Int(max(Double(med) * 1.25, Double(maxVal) * 0.22)))
+
+        var peaks = findPeaks(sm, peakMin: peakMin, length: w)
+        // Dedupe LESS aggressively to keep close noteheads distinct
+        peaks = dedupePeaks(peaks, minDistance: max(2, Int(Double(w) * 0.045)))
+
+        if peaks.count >= 2 {
+            peaks = Array(peaks.prefix(maxSplits))
+            return splitRectsWide(from: peaks, in: croppedRect, cropWidth: w)
+        }
+
+        return [croppedRect]
+    }
+
+    private static func splitRectsWide(from peakCols: [Int], in rect: CGRect, cropWidth: Int) -> [CGRect] {
         guard !peakCols.isEmpty else { return [rect] }
 
-        // Estimate width per notehead as rect.height * 0.9, but clamp to reasonable
-        let estW = max(10.0, min(rect.height * 0.95, rect.width / CGFloat(peakCols.count)))
+        // width per head ~ rect.height * 0.95 (clamped)
+        let estW = max(10.0, min(rect.height * 0.98, rect.width / CGFloat(peakCols.count)))
 
         var out: [CGRect] = []
         out.reserveCapacity(peakCols.count)
@@ -149,9 +168,111 @@ enum NoteBlobSplitter {
             }
         }
 
-        // If we accidentally produced overlapping duplicates, lightly NMS them here
-        return quickNMS(out, iouThreshold: 0.55)
+        return quickNMS(out, iouThreshold: 0.50)
     }
+
+    // MARK: - Tall split (Y)  ✅ fixes triads / stacked heads
+
+    private static func trySplitTall(
+        croppedRect: CGRect,
+        pixels: [UInt8],
+        w: Int,
+        h: Int,
+        threshold: Int,
+        maxSplits: Int
+    ) -> [CGRect] {
+
+        // Only attempt if it's plausibly tall
+        if croppedRect.height < croppedRect.width * 1.15 { return [croppedRect] }
+
+        // Ignore left/right band to reduce stems / barlines influence
+        let x0 = Int(Double(w) * 0.20)
+        let x1 = Int(Double(w) * 0.80)
+
+        var rowInk = [Int](repeating: 0, count: h)
+        for y in 0..<h {
+            var s = 0
+            for x in x0..<x1 {
+                let i = (y * w + x) * 4
+                let lum = (Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2])) / 3
+                if lum < threshold { s += 1 }
+            }
+            rowInk[y] = s
+        }
+
+        var sm = smooth(rowInk, radius: 3)
+        let baseline = percentile(sm, p: 0.20)
+        if baseline > 0 {
+            for i in 0..<sm.count { sm[i] = max(0, sm[i] - baseline) }
+        }
+
+        let maxVal = sm.max() ?? 0
+        if maxVal <= 0 { return [croppedRect] }
+
+        let med = percentile(sm, p: 0.50)
+        let peakMin = max(2, Int(max(Double(med) * 1.25, Double(maxVal) * 0.22)))
+
+        var peaks = findPeaks(sm, peakMin: peakMin, length: h)
+        peaks = dedupePeaks(peaks, minDistance: max(2, Int(Double(h) * 0.055)))
+
+        if peaks.count >= 2 {
+            peaks = Array(peaks.prefix(maxSplits))
+            return splitRectsTall(from: peaks, in: croppedRect, cropHeight: h)
+        }
+
+        return [croppedRect]
+    }
+
+    private static func splitRectsTall(from peakRows: [Int], in rect: CGRect, cropHeight: Int) -> [CGRect] {
+        guard !peakRows.isEmpty else { return [rect] }
+
+        // height per head ~ rect.width * 0.95 (clamped)
+        let estH = max(10.0, min(rect.width * 1.05, rect.height / CGFloat(peakRows.count)))
+
+        var out: [CGRect] = []
+        out.reserveCapacity(peakRows.count)
+
+        for p in peakRows {
+            let cy = rect.minY + CGFloat(p) * (rect.height / CGFloat(max(1, cropHeight))) + 0.5
+            let newRect = CGRect(
+                x: rect.minX,
+                y: cy - estH / 2.0,
+                width: rect.width,
+                height: estH
+            ).intersection(rect)
+
+            if newRect.width >= 6 && newRect.height >= 6 {
+                out.append(newRect)
+            }
+        }
+
+        return quickNMS(out, iouThreshold: 0.50)
+    }
+
+    // MARK: - Peak finding
+
+    private static func findPeaks(_ arr: [Int], peakMin: Int, length: Int) -> [Int] {
+        guard length >= 3 else { return [] }
+        var peaks: [Int] = []
+        var i = 1
+        while i < length - 1 {
+            if arr[i] >= peakMin, arr[i] >= arr[i - 1], arr[i] >= arr[i + 1] {
+
+                // plateau -> choose center
+                var l = i
+                var r = i
+                while l - 1 >= 0 && arr[l - 1] == arr[i] { l -= 1 }
+                while r + 1 < length && arr[r + 1] == arr[i] { r += 1 }
+                peaks.append((l + r) / 2)
+                i = r + 1
+            } else {
+                i += 1
+            }
+        }
+        return peaks
+    }
+
+    // MARK: - NMS / IoU
 
     private static func quickNMS(_ boxes: [CGRect], iouThreshold: CGFloat) -> [CGRect] {
         let sorted = boxes.sorted { ($0.width * $0.height) > ($1.width * $1.height) }
