@@ -47,12 +47,18 @@ enum OfflineScoreColorizer {
                     Task {
                         let staffModel = await StaffDetector.detectStaff(in: image)
                         let detection = await NoteheadDetector.detectDebug(in: image)
+                        let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
+                        let barlines = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
+                        let filteredNotes = filterNoteheads(detection.noteRects,
+                                                            systems: systems,
+                                                            barlines: barlines,
+                                                            fallbackSpacing: staffModel?.lineSpacing ?? 12.0)
 
                         let colored = drawOverlays(
                             on: image,
                             staff: staffModel,
-                            noteheads: detection.noteRects,
-                            barlines: detection.barlineRects
+                            noteheads: filteredNotes,
+                            barlines: barlines
                         )
 
                         if let pdfPage = PDFPage(image: colored) {
@@ -112,6 +118,64 @@ enum OfflineScoreColorizer {
     }
 
     // MARK: - Draw overlays
+
+    private static func filterNoteheads(_ noteheads: [CGRect],
+                                        systems: [SystemBlock],
+                                        barlines: [CGRect],
+                                        fallbackSpacing: CGFloat) -> [CGRect] {
+        guard !noteheads.isEmpty else { return [] }
+        guard !systems.isEmpty else {
+            return DuplicateSuppressor.suppress(noteheads, spacing: fallbackSpacing)
+        }
+
+        var filtered: [CGRect] = []
+        var consumed = Set<Int>()
+
+        for system in systems {
+            let systemZone = symbolZone(for: system, barlines: barlines)
+            let systemNotes = noteheads.enumerated().compactMap { index, rect -> CGRect? in
+                guard system.bbox.contains(CGPoint(x: rect.midX, y: rect.midY)) else { return nil }
+                consumed.insert(index)
+                return rect
+            }
+
+            let withoutSymbols = systemNotes.filter { rect in
+                let center = CGPoint(x: rect.midX, y: rect.midY)
+                return !systemZone.contains(center)
+            }
+
+            let deduped = DuplicateSuppressor.suppress(withoutSymbols, spacing: system.spacing)
+            filtered.append(contentsOf: deduped)
+        }
+
+        if consumed.count < noteheads.count {
+            let remaining = noteheads.enumerated().compactMap { index, rect -> CGRect? in
+                guard !consumed.contains(index) else { return nil }
+                return rect
+            }
+            filtered.append(contentsOf: DuplicateSuppressor.suppress(remaining, spacing: fallbackSpacing))
+        }
+
+        return filtered
+    }
+
+    private static func symbolZone(for system: SystemBlock, barlines: [CGRect]) -> CGRect {
+        let defaultWidth = system.spacing * 7.0
+        let systemBars = barlines
+            .filter { $0.intersects(system.bbox) }
+            .sorted { $0.minX < $1.minX }
+        if let first = systemBars.first {
+            let width = min(first.minX - system.bbox.minX, defaultWidth)
+            return CGRect(x: system.bbox.minX,
+                          y: system.bbox.minY,
+                          width: max(0, width),
+                          height: system.bbox.height)
+        }
+        return CGRect(x: system.bbox.minX,
+                      y: system.bbox.minY,
+                      width: defaultWidth,
+                      height: system.bbox.height)
+    }
 
     private static func drawOverlays(on image: PlatformImage,
                                      staff: StaffModel?,
