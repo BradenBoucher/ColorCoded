@@ -108,12 +108,28 @@ enum NoteBlobSplitter {
         // Only attempt if it's plausibly wide or at least not extremely tall
         if croppedRect.width < croppedRect.height * 1.10 { return [croppedRect] }
 
-        // Ignore top/bottom band to reduce beams/ties
-        let y0 = Int(Double(h) * 0.18)
-        let y1 = Int(Double(h) * 0.82)
+        var rowInk = [Int](repeating: 0, count: h)
+        for y in 0..<h {
+            var s = 0
+            for x in 0..<w {
+                let i = (y * w + x) * 4
+                let lum = (Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2])) / 3
+                if lum < threshold { s += 1 }
+            }
+            rowInk[y] = s
+        }
+
+        rowInk = smooth(rowInk, radius: 2)
+        let rowMax = rowInk.max() ?? 0
+        let beamRowMin = Int(Double(rowMax) * 0.80)
+
+        // Widen the band to keep noteheads while still suppressing beams.
+        let y0 = Int(Double(h) * 0.06)
+        let y1 = Int(Double(h) * 0.94)
 
         var colInk = [Int](repeating: 0, count: w)
         for y in y0..<y1 {
+            if rowInk[y] >= beamRowMin { continue }
             for x in 0..<w {
                 let i = (y * w + x) * 4
                 let lum = (Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2])) / 3
@@ -131,7 +147,7 @@ enum NoteBlobSplitter {
         if maxVal <= 0 { return [croppedRect] }
 
         let med = percentile(sm, p: 0.50)
-        let peakMin = max(2, Int(max(Double(med) * 1.25, Double(maxVal) * 0.22)))
+        let peakMin = max(2, Int(max(Double(med) * 1.15, Double(maxVal) * 0.18)))
 
         var peaks = findPeaks(sm, peakMin: peakMin, length: w)
         // Dedupe LESS aggressively to keep close noteheads distinct
