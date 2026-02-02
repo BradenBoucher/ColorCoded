@@ -152,7 +152,6 @@ enum OfflineScoreColorizer {
             }
 
             if !barlines.isEmpty {
-                ctx.cgContext.setAlpha(1.0)
                 ctx.cgContext.setLineWidth(max(1.5, baseRadius * 0.12))
                 ctx.cgContext.setStrokeColor(UIColor.systemTeal.withAlphaComponent(0.65).cgColor)
                 for rect in barlines {
