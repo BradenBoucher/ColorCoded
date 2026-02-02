@@ -12,8 +12,8 @@ enum NoteheadDetector {
         return result.noteRects
     }
 
-    /// Debug: noteheads + barline rectangles (so you can overlay and confirm)
-    static func detectDebug(in image: PlatformImage) async -> (noteRects: [CGRect], barlineRects: [CGRect]) {
+    /// Debug: noteheads + staff rectangles (treble/bass systems).
+    static func detectDebug(in image: PlatformImage) async -> (noteRects: [CGRect], staffRects: [CGRect]) {
         guard let cg = image.cgImageSafe else { return ([], []) }
 
         let imageSize = CGSize(width: cg.width, height: cg.height)
@@ -41,10 +41,10 @@ enum NoteheadDetector {
                         // Reduce duplicates, but keep close stacked notes
                         let notes = nonMaxSuppression(split, iouThreshold: 0.78)
 
-                        // Barline debug rectangles
-                        let barlines = detectBarlines(inCG: cg)
+                        // Staff debug rectangles
+                        let staffRects = detectStaffRects(inCG: cg)
 
-                        continuation.resume(returning: (notes, barlines))
+                        continuation.resume(returning: (notes, staffRects))
                     }
 
                     request.contrastAdjustment = 1.2
@@ -148,11 +148,11 @@ enum NoteheadDetector {
         return interArea / max(1, unionArea)
     }
 
-    // MARK: - Barline debug detection (rectangles)
+    // MARK: - Staff debug detection (rectangles)
 
-    /// Returns rectangles you can overlay to confirm we found barlines.
+    /// Returns rectangles around each staff band (treble/bass systems).
     /// This is intentionally "debug-focused" and favors recall.
-    private static func detectBarlines(inCG cg: CGImage) -> [CGRect] {
+    private static func detectStaffRects(inCG cg: CGImage) -> [CGRect] {
         let w = cg.width
         let h = cg.height
         guard w > 0, h > 0 else { return [] }
@@ -201,11 +201,10 @@ enum NoteheadDetector {
             bands = [(0, max(1, h - 1))]
         }
 
-        // 2) For each band, do vertical projection and find strong columns
         var out: [CGRect] = []
-        out.reserveCapacity(bands.count * 8)
+        out.reserveCapacity(staffBands.count)
 
-        for (y0, y1) in bands {
+        for (y0, y1) in staffBands {
             let bandH = y1 - y0
             if bandH <= 0 { continue }
 
@@ -251,11 +250,10 @@ enum NoteheadDetector {
             }
         }
 
-        // Light NMS so you don't get thick duplicates
-        return quickNMS(out, iouThreshold: 0.35)
+        return out
     }
 
-    // MARK: - Bar helpers
+    // MARK: - Band helpers
 
     private static func findBands(_ rowInk: [Int], minVal: Int, minHeight: Int) -> [(Int, Int)] {
         var bands: [(Int, Int)] = []
@@ -273,7 +271,7 @@ enum NoteheadDetector {
                 i += 1
             }
         }
-        return mergeBands(bands, gap: 12)
+        return bands
     }
 
     private static func mergeBands(_ bands: [(Int, Int)], gap: Int) -> [(Int, Int)] {
@@ -292,38 +290,6 @@ enum NoteheadDetector {
             }
         }
         return out
-    }
-
-    private static func findRuns(_ arr: [Int], minVal: Int, minWidth: Int) -> [Range<Int>] {
-        var runs: [Range<Int>] = []
-        var i = 0
-        while i < arr.count {
-            if arr[i] >= minVal {
-                let start = i
-                var end = i
-                while end < arr.count && arr[end] >= minVal { end += 1 }
-                if end - start >= minWidth {
-                    runs.append(start..<end)
-                }
-                i = end
-            } else {
-                i += 1
-            }
-        }
-        return runs
-    }
-
-    private static func quickNMS(_ boxes: [CGRect], iouThreshold: CGFloat) -> [CGRect] {
-        let sorted = boxes.sorted { ($0.width * $0.height) > ($1.width * $1.height) }
-        var kept: [CGRect] = []
-        for b in sorted {
-            var keep = true
-            for k in kept {
-                if iou(b, k) > iouThreshold { keep = false; break }
-            }
-            if keep { kept.append(b) }
-        }
-        return kept
     }
 
     // MARK: - Shared small helpers
