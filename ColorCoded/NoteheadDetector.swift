@@ -191,12 +191,15 @@ enum NoteheadDetector {
 
         rowInk = smooth(rowInk, radius: 6)
 
-        // band threshold: keep rows with ink significantly above median
+        // band threshold: keep rows with ink above median (favor recall for debug)
         let med = percentile(rowInk, p: 0.50)
-        let bandMin = max(8, Int(Double(med) * 1.6))
+        let bandMin = max(4, Int(Double(med) * 1.2))
 
-        let bands = findBands(rowInk, minVal: bandMin, minHeight: max(40, h / 18))
-        guard !bands.isEmpty else { return [] }
+        var bands = findBands(rowInk, minVal: bandMin, minHeight: max(24, h / 24))
+        let usingFallbackBand = bands.isEmpty
+        if usingFallbackBand {
+            bands = [(0, max(1, h - 1))]
+        }
 
         // 2) For each band, do vertical projection and find strong columns
         var out: [CGRect] = []
@@ -228,7 +231,9 @@ enum NoteheadDetector {
 
             // Barline columns tend to be very strong vertically
             let colMed = percentile(colInk, p: 0.50)
-            let barMin = max(Int(Double(colMed) * 2.8), Int(Double(maxVal) * 0.55))
+            let barMinMultiplier = usingFallbackBand ? 1.8 : 2.2
+            let barMaxFrac = usingFallbackBand ? 0.40 : 0.48
+            let barMin = max(Int(Double(colMed) * barMinMultiplier), Int(Double(maxVal) * barMaxFrac))
 
             // Find contiguous "hot" column runs
             let runs = findRuns(colInk, minVal: barMin, minWidth: 2)
