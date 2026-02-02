@@ -46,9 +46,14 @@ enum OfflineScoreColorizer {
 
                     Task {
                         let staffModel = await StaffDetector.detectStaff(in: image)
-                        let noteheads = await NoteheadDetector.detectNoteheads(in: image)
+                        let detection = await NoteheadDetector.detectDebug(in: image)
 
-                        let colored = drawOverlays(on: image, staff: staffModel, noteheads: noteheads)
+                        let colored = drawOverlays(
+                            on: image,
+                            staff: staffModel,
+                            noteheads: detection.noteRects,
+                            staffRects: detection.staffRects
+                        )
 
                         if let pdfPage = PDFPage(image: colored) {
                             outDoc.insert(pdfPage, at: outDoc.pageCount)
@@ -110,7 +115,8 @@ enum OfflineScoreColorizer {
 
     private static func drawOverlays(on image: PlatformImage,
                                      staff: StaffModel?,
-                                     noteheads: [CGRect]) -> PlatformImage {
+                                     noteheads: [CGRect],
+                                     staffRects: [CGRect]) -> PlatformImage {
         let renderer = UIGraphicsImageRenderer(size: image.size)
         return renderer.image { ctx in
             image.draw(at: .zero)
@@ -143,6 +149,15 @@ enum OfflineScoreColorizer {
                                                      y: center.y - dotR,
                                                      width: dotR * 2,
                                                      height: dotR * 2))
+            }
+
+            if !staffRects.isEmpty {
+                ctx.cgContext.setAlpha(1.0)
+                ctx.cgContext.setLineWidth(max(2.0, baseRadius * 0.14))
+                ctx.cgContext.setStrokeColor(UIColor.systemTeal.withAlphaComponent(0.75).cgColor)
+                for rect in staffRects {
+                    ctx.cgContext.stroke(rect)
+                }
             }
         }
     }

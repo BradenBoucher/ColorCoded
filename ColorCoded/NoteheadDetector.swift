@@ -12,8 +12,8 @@ enum NoteheadDetector {
         return result.noteRects
     }
 
-    /// Debug: noteheads + barline rectangles (so you can overlay and confirm)
-    static func detectDebug(in image: PlatformImage) async -> (noteRects: [CGRect], barlineRects: [CGRect]) {
+    /// Debug: noteheads + staff rectangles (treble/bass systems).
+    static func detectDebug(in image: PlatformImage) async -> (noteRects: [CGRect], staffRects: [CGRect]) {
         guard let cg = image.cgImageSafe else { return ([], []) }
 
         let imageSize = CGSize(width: cg.width, height: cg.height)
@@ -41,10 +41,10 @@ enum NoteheadDetector {
                         // Reduce duplicates, but keep close stacked notes
                         let notes = nonMaxSuppression(split, iouThreshold: 0.78)
 
-                        // Barline debug rectangles
-                        let barlines = detectBarlines(inCG: cg)
+                        // Staff debug rectangles
+                        let staffRects = detectStaffRects(inCG: cg)
 
-                        continuation.resume(returning: (notes, barlines))
+                        continuation.resume(returning: (notes, staffRects))
                     }
 
                     request.contrastAdjustment = 1.2
@@ -148,11 +148,11 @@ enum NoteheadDetector {
         return interArea / max(1, unionArea)
     }
 
-    // MARK: - Barline debug detection (rectangles)
+    // MARK: - Staff debug detection (rectangles)
 
-    /// Returns rectangles you can overlay to confirm we found barlines.
+    /// Returns rectangles around each staff band (treble/bass systems).
     /// This is intentionally "debug-focused" and favors recall.
-    private static func detectBarlines(inCG cg: CGImage) -> [CGRect] {
+    private static func detectStaffRects(inCG cg: CGImage) -> [CGRect] {
         let w = cg.width
         let h = cg.height
         guard w > 0, h > 0 else { return [] }
@@ -191,66 +191,43 @@ enum NoteheadDetector {
 
         rowInk = smooth(rowInk, radius: 6)
 
-        // band threshold: keep rows with ink significantly above median
+        // Band threshold: keep rows with ink above median (favor recall for debug)
         let med = percentile(rowInk, p: 0.50)
-        let bandMin = max(8, Int(Double(med) * 1.6))
+        let bandMin = max(6, Int(Double(med) * 1.35))
 
-        let bands = findBands(rowInk, minVal: bandMin, minHeight: max(40, h / 18))
-        guard !bands.isEmpty else { return [] }
+        let bands = findBands(rowInk, minVal: bandMin, minHeight: max(36, h / 22))
+        let usingFallbackBand = bands.isEmpty
+        let staffBands: [(Int, Int)]
+        if usingFallbackBand {
+            staffBands = [(0, max(1, h - 1))]
+        } else {
+            staffBands = mergeBands(bands, gap: 14)
+        }
 
-        // 2) For each band, do vertical projection and find strong columns
         var out: [CGRect] = []
-        out.reserveCapacity(bands.count * 8)
+        out.reserveCapacity(staffBands.count)
 
-        for (y0, y1) in bands {
+        for (y0, y1) in staffBands {
             let bandH = y1 - y0
             if bandH <= 0 { continue }
-
-            var colInk = [Int](repeating: 0, count: w)
-
-            // sample every 2px vertically for speed
-            var y = y0
-            while y < y1 {
-                var x = 0
-                while x < w {
-                    let i = (y * w + x) * 4
-                    let lum = (Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2])) / 3
-                    if lum < threshold { colInk[x] += 1 }
-                    x += 1
-                }
-                y += 2
-            }
-
-            colInk = smooth(colInk, radius: 2)
-
-            let maxVal = colInk.max() ?? 0
-            if maxVal <= 0 { continue }
-
-            // Barline columns tend to be very strong vertically
-            let colMed = percentile(colInk, p: 0.50)
-            let barMin = max(Int(Double(colMed) * 2.8), Int(Double(maxVal) * 0.55))
-
-            // Find contiguous "hot" column runs
-            let runs = findRuns(colInk, minVal: barMin, minWidth: 2)
-
-            for r in runs {
-                let x0 = CGFloat(r.lowerBound)
-                let x1 = CGFloat(r.upperBound)
-                let rect = CGRect(
-                    x: x0 - 1,
-                    y: CGFloat(y0) - 2,
-                    width: (x1 - x0) + 2,
-                    height: CGFloat((y1 - y0) + 4)
-                )
+            let pad = max(6, Int(Double(bandH) * 0.08))
+            let top = max(0, y0 - pad)
+            let bot = min(h - 1, y1 + pad)
+            let rect = CGRect(
+                x: 6,
+                y: CGFloat(top),
+                width: CGFloat(max(1, w - 12)),
+                height: CGFloat(bot - top)
+            )
+            if rect.height >= 24 {
                 out.append(rect)
             }
         }
 
-        // Light NMS so you don't get thick duplicates
-        return quickNMS(out, iouThreshold: 0.35)
+        return out
     }
 
-    // MARK: - Bar helpers
+    // MARK: - Band helpers
 
     private static func findBands(_ rowInk: [Int], minVal: Int, minHeight: Int) -> [(Int, Int)] {
         var bands: [(Int, Int)] = []
@@ -268,7 +245,7 @@ enum NoteheadDetector {
                 i += 1
             }
         }
-        return mergeBands(bands, gap: 12)
+        return bands
     }
 
     private static func mergeBands(_ bands: [(Int, Int)], gap: Int) -> [(Int, Int)] {
@@ -287,38 +264,6 @@ enum NoteheadDetector {
             }
         }
         return out
-    }
-
-    private static func findRuns(_ arr: [Int], minVal: Int, minWidth: Int) -> [Range<Int>] {
-        var runs: [Range<Int>] = []
-        var i = 0
-        while i < arr.count {
-            if arr[i] >= minVal {
-                let start = i
-                var end = i
-                while end < arr.count && arr[end] >= minVal { end += 1 }
-                if end - start >= minWidth {
-                    runs.append(start..<end)
-                }
-                i = end
-            } else {
-                i += 1
-            }
-        }
-        return runs
-    }
-
-    private static func quickNMS(_ boxes: [CGRect], iouThreshold: CGFloat) -> [CGRect] {
-        let sorted = boxes.sorted { ($0.width * $0.height) > ($1.width * $1.height) }
-        var kept: [CGRect] = []
-        for b in sorted {
-            var keep = true
-            for k in kept {
-                if iou(b, k) > iouThreshold { keep = false; break }
-            }
-            if keep { kept.append(b) }
-        }
-        return kept
     }
 
     // MARK: - Shared small helpers
