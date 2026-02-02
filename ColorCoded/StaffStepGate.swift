@@ -11,6 +11,10 @@ struct ScoredHead {
     var clef: ClefKind?
     var staffStepIndex: Int?
     var staffStepError: CGFloat?
+    var score: CGFloat {
+        guard let staffStepError else { return 0 }
+        return 1.0 - staffStepError
+    }
 }
 
 enum StaffStepGate {
