@@ -52,7 +52,7 @@ enum OfflineScoreColorizer {
                             on: image,
                             staff: staffModel,
                             noteheads: detection.noteRects,
-                            staffRects: detection.staffRects
+                            barlines: detection.barlineRects
                         )
 
                         if let pdfPage = PDFPage(image: colored) {
@@ -116,7 +116,7 @@ enum OfflineScoreColorizer {
     private static func drawOverlays(on image: PlatformImage,
                                      staff: StaffModel?,
                                      noteheads: [CGRect],
-                                     staffRects: [CGRect]) -> PlatformImage {
+                                     barlines: [CGRect]) -> PlatformImage {
         let renderer = UIGraphicsImageRenderer(size: image.size)
         return renderer.image { ctx in
             image.draw(at: .zero)
@@ -151,11 +151,10 @@ enum OfflineScoreColorizer {
                                                      height: dotR * 2))
             }
 
-            if !staffRects.isEmpty {
-                ctx.cgContext.setAlpha(1.0)
-                ctx.cgContext.setLineWidth(max(CGFloat(2.0), baseRadius * 0.14))
-                ctx.cgContext.setStrokeColor(UIColor.systemTeal.withAlphaComponent(0.75).cgColor)
-                for rect in staffRects {
+            if !barlines.isEmpty {
+                ctx.cgContext.setLineWidth(max(1.5, baseRadius * 0.12))
+                ctx.cgContext.setStrokeColor(UIColor.systemTeal.withAlphaComponent(0.65).cgColor)
+                for rect in barlines {
                     ctx.cgContext.stroke(rect)
                 }
             }
