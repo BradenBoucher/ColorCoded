@@ -128,7 +128,29 @@ enum OfflineScoreColorizer {
         var consumed = Set<Int>()
 
         for system in systems {
-            let systemZone = SystemDetector.symbolZone(for: system, barlines: barlines)
+            // Derive a symbol zone within this system to exclude clefs, key/time signatures, etc.
+            // We approximate by taking a strip from the left side of the system's bbox and extending to any nearby barlines.
+            let systemZone: CGRect = {
+                let bbox = system.bbox
+                // Base zone: a fraction of the system width from the left (e.g., 18% of width)
+                let baseWidth = max(12.0, bbox.width * 0.18)
+                var zone = CGRect(x: bbox.minX, y: bbox.minY, width: baseWidth, height: bbox.height)
+
+                // If there are barlines inside this system, expand the zone up to the first barline (closest to the left)
+                if !barlines.isEmpty {
+                    // Consider barlines that intersect vertically with the system bbox and lie within the bbox horizontally
+                    let candidates = barlines.filter { br in
+                        br.maxY >= bbox.minY && br.minY <= bbox.maxY && br.maxX > bbox.minX && br.minX < bbox.maxX
+                    }
+                    if let nearest = candidates.min(by: { $0.minX < $1.minX }) {
+                        let clampedX = max(bbox.minX, min(nearest.minX, bbox.maxX))
+                        let newWidth = max(zone.width, clampedX - bbox.minX)
+                        zone.size.width = newWidth
+                    }
+                }
+                return zone
+            }()
+
             let systemNotes = noteheads.enumerated().compactMap { index, rect -> CGRect? in
                 guard system.bbox.contains(CGPoint(x: rect.midX, y: rect.midY)) else { return nil }
                 consumed.insert(index)
@@ -203,3 +225,4 @@ enum OfflineScoreColorizer {
         }
     }
 }
+
