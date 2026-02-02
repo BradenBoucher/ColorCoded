@@ -49,15 +49,11 @@ enum OfflineScoreColorizer {
                         let detection = await NoteheadDetector.detectDebug(in: image)
                         let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
                         let barlines = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
-                        let filteredNotes = filterNoteheads(detection.noteRects,
-                                                            systems: systems,
-                                                            barlines: barlines,
-                                                            fallbackSpacing: staffModel?.lineSpacing ?? 12.0)
 
                         let colored = drawOverlays(
                             on: image,
                             staff: staffModel,
-                            noteheads: filteredNotes,
+                            noteheads: detection.noteRects,
                             barlines: barlines
                         )
 

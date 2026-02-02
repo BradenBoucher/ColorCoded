@@ -48,24 +48,6 @@ enum SystemDetector {
         return systems
     }
 
-    static func symbolZone(for system: SystemBlock, barlines: [CGRect]) -> CGRect {
-        let defaultWidth = system.spacing * 7.0
-        let systemBars = barlines
-            .filter { $0.intersects(system.bbox) }
-            .sorted { $0.minX < $1.minX }
-        if let first = systemBars.first {
-            let width = min(first.minX - system.bbox.minX, defaultWidth)
-            return CGRect(x: system.bbox.minX,
-                          y: system.bbox.minY,
-                          width: max(0, width),
-                          height: system.bbox.height)
-        }
-        return CGRect(x: system.bbox.minX,
-                      y: system.bbox.minY,
-                      width: defaultWidth,
-                      height: system.bbox.height)
-    }
-
     private static func avg(_ ys: [CGFloat]) -> CGFloat {
         guard !ys.isEmpty else { return 0 }
         let total = ys.reduce(0, +)
