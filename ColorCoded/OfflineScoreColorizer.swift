@@ -50,10 +50,18 @@ enum OfflineScoreColorizer {
                         let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
                         let barlines = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
 
+                        let filtered = filterNoteheads(
+                            detection.noteRects,
+                            systems: systems,
+                            barlines: barlines,
+                            fallbackSpacing: staffModel?.lineSpacing ?? 12.0,
+                            cgImage: image.cgImageSafe
+                        )
+
                         let colored = drawOverlays(
                             on: image,
                             staff: staffModel,
-                            noteheads: detection.noteRects,
+                            noteheads: filtered,
                             barlines: barlines
                         )
 
@@ -118,16 +126,23 @@ enum OfflineScoreColorizer {
     private static func filterNoteheads(_ noteheads: [CGRect],
                                         systems: [SystemBlock],
                                         barlines: [CGRect],
-                                        fallbackSpacing: CGFloat) -> [CGRect] {
+                                        fallbackSpacing: CGFloat,
+                                        cgImage: CGImage?) -> [CGRect] {
         guard !noteheads.isEmpty else { return [] }
         guard !systems.isEmpty else {
             return DuplicateSuppressor.suppress(noteheads, spacing: fallbackSpacing)
         }
 
+        let binary = cgImage.flatMap { BinaryImage(from: $0, threshold: 180) }
+
         var filtered: [CGRect] = []
         var consumed = Set<Int>()
 
         for system in systems {
+            let barlineXs = barlines
+                .filter { $0.maxY >= system.bbox.minY && $0.minY <= system.bbox.maxY }
+                .map { $0.midX }
+
             // Derive a symbol zone within this system to exclude clefs, key/time signatures, etc.
             // We approximate by taking a strip from the left side of the system's bbox and extending to any nearby barlines.
             let systemZone: CGRect = {
