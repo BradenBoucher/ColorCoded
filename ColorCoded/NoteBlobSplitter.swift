@@ -67,12 +67,14 @@ enum NoteBlobSplitter {
         // (works for cases where projections are weak due to blur/light gray ink)
         let ar = croppedRect.width / max(1, croppedRect.height)
 
-        // Estimate "single head size" ~ minDim * 0.9
+        // Estimate "single head size" from the smaller dimension, but avoid
+        // overestimating when stems/beams make the blob very tall.
         let minDim = min(croppedRect.width, croppedRect.height)
-        let estSingle = max(10.0, minDim * 0.9)
+        let estSingleWide = max(10.0, min(croppedRect.height * 0.60, minDim * 0.9))
+        let estSingleTall = max(10.0, min(croppedRect.width * 0.60, minDim * 0.9))
 
         if ar >= 1.25 {
-            let expected = Int((croppedRect.width / estSingle).rounded())
+            let expected = Int((croppedRect.width / estSingleWide).rounded())
             if expected >= 2 {
                 let n = min(maxSplits, expected)
                 let forcedCenters = (0..<n).map { i in
@@ -81,7 +83,7 @@ enum NoteBlobSplitter {
                 return splitRectsWide(from: forcedCenters, in: croppedRect, cropWidth: w)
             }
         } else if ar <= 0.80 {
-            let expected = Int((croppedRect.height / estSingle).rounded())
+            let expected = Int((croppedRect.height / estSingleTall).rounded())
             if expected >= 2 {
                 let n = min(maxSplits, expected)
                 let forcedCenters = (0..<n).map { i in
