@@ -177,43 +177,11 @@ enum OfflineScoreColorizer {
                 return !systemZone.contains(center)
             }
 
-            let verticalMask = binary.flatMap {
-                VerticalStrokeMask.build(
-                    from: $0.data,
-                    width: $0.width,
-                    height: $0.height,
-                    roi: system.bbox,
-                    minRun: max(2, Int((system.spacing * 3.5).rounded(.up)))
-                )
-            }
-
-            let scored = withoutSymbols.compactMap { rect -> ScoredHead? in
-                guard rect.width > 0, rect.height > 0 else { return nil }
-                let extent = binary.map { $0.extent(in: rect) } ?? 0.0
-                let isStemLike = rect.height > system.spacing * 1.8 && rect.width < system.spacing * 0.6
-                let isTieLike = rect.width > system.spacing * 1.8 && rect.height < system.spacing * 0.45
-                guard extent >= 0.25, !isStemLike, !isTieLike else { return nil }
-
-                let overlap = verticalMask?.overlapRatio(with: rect) ?? 0.0
-                if overlap > 0.22 { return nil }
-
-                var score = max(0, min(1, (extent - 0.18) / 0.40))
-                if overlap > 0.10 {
-                    score = max(0, score - 0.7)
-                }
-
-                let noteheadLike = rect.width >= system.spacing * 0.6 && rect.width <= system.spacing * 1.6
-                let nearBarline = barlineXs.contains { abs($0 - rect.midX) <= system.spacing * 0.20 }
-                if nearBarline && (!noteheadLike || score < 0.85) {
-                    return nil
-                }
-
-                return ScoredHead(rect: rect, score: score)
-            }
-
+            let scored = withoutSymbols.map { ScoredHead(rect: $0) }
             let gated = StaffStepGate.filterCandidates(scored, system: system)
-            let deduped = ClusterSuppressor.suppress(gated, spacing: system.spacing)
-            filtered.append(contentsOf: deduped.map { $0.rect })
+            let gatedRects = gated.map { $0.rect }
+            let deduped = DuplicateSuppressor.suppress(gatedRects, spacing: system.spacing)
+            filtered.append(contentsOf: deduped)
         }
 
         if consumed.count < noteheads.count {
@@ -273,64 +241,5 @@ enum OfflineScoreColorizer {
                 }
             }
         }
-    }
-}
-
-private struct BinaryImage {
-    let data: [UInt8]
-    let width: Int
-    let height: Int
-
-    init?(from cgImage: CGImage, threshold: Int) {
-        let w = cgImage.width
-        let h = cgImage.height
-        guard w > 0, h > 0 else { return nil }
-
-        var pixels = [UInt8](repeating: 0, count: w * h * 4)
-        guard let ctx = CGContext(
-            data: &pixels,
-            width: w,
-            height: h,
-            bitsPerComponent: 8,
-            bytesPerRow: w * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-
-        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
-
-        var out = [UInt8](repeating: 0, count: w * h)
-        for y in 0..<h {
-            for x in 0..<w {
-                let i = (y * w + x) * 4
-                let lum = (Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2])) / 3
-                if lum < threshold { out[y * w + x] = 1 }
-            }
-        }
-
-        self.data = out
-        self.width = w
-        self.height = h
-    }
-
-    func extent(in rect: CGRect) -> CGFloat {
-        let clipped = rect.intersection(CGRect(x: 0, y: 0, width: width, height: height))
-        guard clipped.width > 0, clipped.height > 0 else { return 0 }
-
-        let x0 = max(0, Int(clipped.minX.rounded(.down)))
-        let y0 = max(0, Int(clipped.minY.rounded(.down)))
-        let x1 = min(width, Int(clipped.maxX.rounded(.up)))
-        let y1 = min(height, Int(clipped.maxY.rounded(.up)))
-
-        var count = 0
-        for y in y0..<y1 {
-            let row = y * width
-            for x in x0..<x1 {
-                if data[row + x] != 0 { count += 1 }
-            }
-        }
-
-        let area = max(1, Int(rect.width * rect.height))
-        return CGFloat(count) / CGFloat(area)
     }
 }

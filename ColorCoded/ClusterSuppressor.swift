@@ -4,9 +4,7 @@ import Foundation
 enum ClusterSuppressor {
     static func suppress(_ candidates: [ScoredHead], spacing: CGFloat) -> [ScoredHead] {
         guard !candidates.isEmpty else { return [] }
-        let sorted = candidates.sorted(by: { (lhs: ScoredHead, rhs: ScoredHead) -> Bool in
-            lhs.score > rhs.score
-        })
+        let sorted = candidates.sorted { $0.score > $1.score }
         var kept: [ScoredHead] = []
         kept.reserveCapacity(sorted.count)
 

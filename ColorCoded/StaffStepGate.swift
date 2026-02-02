@@ -8,15 +8,9 @@ enum ClefKind {
 
 struct ScoredHead {
     let rect: CGRect
-    var score: CGFloat
     var clef: ClefKind?
     var staffStepIndex: Int?
     var staffStepError: CGFloat?
-
-    init(rect: CGRect, score: CGFloat = 1.0) {
-        self.rect = rect
-        self.score = score
-    }
 }
 
 enum StaffStepGate {
