@@ -9,6 +9,17 @@ import UIKit
 import AppKit
 #endif
 
+private let debugStrokeErase = true
+
+private struct DebugMaskData {
+    let strokeMask: [UInt8]
+    let protectMask: [UInt8]
+    let width: Int
+    let height: Int
+}
+
+private var debugMaskData: DebugMaskData?
+
 enum OfflineScoreColorizer {
     private enum RejectTuning {
         static let ledgerRunFrac: Double = 0.70
