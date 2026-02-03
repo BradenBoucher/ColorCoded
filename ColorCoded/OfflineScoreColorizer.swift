@@ -227,14 +227,22 @@ enum OfflineScoreColorizer {
             let fill = rectInkExtent(rect, bin: binary, pageW: w, pageH: h)
             if fill < 0.10 { continue }
 
+            let expanded = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u)
+            let expandedFill = rectInkExtent(expanded, bin: binary, pageW: w, pageH: h)
+            let expandedPCA = lineLikenessPCA(expanded, bin: binary, pageW: w, pageH: h)
+            let isBlobLike = expandedFill >= 0.22 &&
+                expandedPCA.eccentricity <= 4.8 &&
+                min(rw, rh) >= 0.28 * u
+            if !isBlobLike { continue }
+
             // Don’t protect if near obvious vertical stroke areas
             if let gsm = globalStrokeMask {
                 let neighborhood = rect.insetBy(dx: -1.0 * u, dy: -0.8 * u)
                 if gsm.overlapRatio(with: neighborhood) > 0.12 { continue }
             }
 
-            let expanded = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u)
-            markMask(&protectMask, rect: expanded, width: w, height: h)
+            let core = rect.insetBy(dx: -0.10 * u, dy: -0.10 * u)
+            markMask(&protectMask, rect: core, width: w, height: h)
         }
 
         // Erase strokes per system
@@ -255,6 +263,19 @@ enum OfflineScoreColorizer {
             }
 
             binary = result.binaryWithoutStrokes
+        }
+
+        if debugStrokeErase {
+            let u = max(7.0, spacing)
+            let sampleStride = max(1, protectRects.count / 30)
+            for (idx, rect) in protectRects.enumerated() where idx % sampleStride == 0 {
+                let core = rect.insetBy(dx: -0.10 * u, dy: -0.10 * u)
+                let fillBefore = rectInkExtent(core, bin: bin, pageW: w, pageH: h)
+                let fillAfter = rectInkExtent(core, bin: binary, pageW: w, pageH: h)
+                if fillBefore > 0.05 && fillAfter < 0.6 * fillBefore {
+                    print("StrokeErase warning: protect rect lost ink before=\(fillBefore) after=\(fillAfter)")
+                }
+            }
         }
 
         if debugStrokeErase, let sm = lastStrokeMask {
@@ -597,6 +618,43 @@ enum OfflineScoreColorizer {
         }
 
         // ------------------------------------------------------------
+        // RULE 0.5) Stroke-through veto (tails/stems/diagonal fragments)
+        // ------------------------------------------------------------
+        if !strongNotehead, let binaryPage {
+            let (bin, pageW, pageH) = binaryPage
+            let expanded = rect.insetBy(dx: -0.10 * u, dy: -0.10 * u).intersection(system.bbox)
+            if expanded.width > 1, expanded.height > 1 {
+                let x0 = max(0, Int(floor(expanded.minX)))
+                let y0 = max(0, Int(floor(expanded.minY)))
+                let x1 = min(pageW, Int(ceil(expanded.maxX)))
+                let y1 = min(pageH, Int(ceil(expanded.maxY)))
+                var maxRun = 0
+                for x in x0..<x1 {
+                    var run = 0
+                    var gap = 0
+                    for y in y0..<y1 {
+                        let isInk = bin[y * pageW + x] != 0
+                        if isInk {
+                            run += 1
+                            gap = 0
+                            maxRun = max(maxRun, run)
+                        } else {
+                            gap += 1
+                            if gap <= 1 {
+                                continue
+                            }
+                            run = 0
+                            gap = 0
+                        }
+                    }
+                }
+                if Double(maxRun) >= 1.15 * Double(spacing) && inkExtent < 0.30 && ecc > 4.8 {
+                    return true
+                }
+            }
+        }
+
+        // ------------------------------------------------------------
         // RULE 0) Barline neighborhood veto (kills barline spam)
         // ------------------------------------------------------------
         if !strongNotehead, !barlineXs.isEmpty {
@@ -841,6 +899,16 @@ enum OfflineScoreColorizer {
                 ctx.cgContext.setStrokeColor(UIColor.systemTeal.withAlphaComponent(0.55).cgColor)
                 for rect in barlines { ctx.cgContext.stroke(rect) }
             }
+
+            // Debug marker: draw an X at the top-left of the page.
+            let markerSize = max(6.0, baseRadius * 0.35)
+            ctx.cgContext.setStrokeColor(UIColor.systemRed.withAlphaComponent(0.8).cgColor)
+            ctx.cgContext.setLineWidth(max(1.5, baseRadius * 0.18))
+            ctx.cgContext.move(to: CGPoint(x: 4, y: 4))
+            ctx.cgContext.addLine(to: CGPoint(x: 4 + markerSize, y: 4 + markerSize))
+            ctx.cgContext.move(to: CGPoint(x: 4 + markerSize, y: 4))
+            ctx.cgContext.addLine(to: CGPoint(x: 4, y: 4 + markerSize))
+            ctx.cgContext.strokePath()
 
             if debugStrokeErase, let maskData = debugMaskData,
                let overlay = buildMaskOverlayImage(maskData: maskData, size: image.size) {

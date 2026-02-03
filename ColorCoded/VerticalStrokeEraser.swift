@@ -33,6 +33,8 @@ enum VerticalStrokeEraser {
         let minRun = max(10, Int((2.2 * u).rounded()))
         let maxGap = max(1, Int((0.12 * u).rounded()))
         let maxWidth = max(2, Int((0.15 * u).rounded()))
+        let longRunThreshold = Int((3.2 * u).rounded())
+        let maxWidthLong = max(4, Int((0.22 * u).rounded()))
         let dilateR = max(1, Int((0.06 * u).rounded()))
 
         // Extra pass: diagonal/curved thin components (tails/slurs)
@@ -59,6 +61,13 @@ enum VerticalStrokeEraser {
         @inline(__always) func idx(_ x: Int, _ y: Int) -> Int { y * width + x }
         @inline(__always) func ink(_ x: Int, _ y: Int) -> Bool { binary[idx(x, y)] != 0 }
 
+        @inline(__always) func findInkNeighborX(_ baseX: Int, _ y: Int) -> Int? {
+            if ink(baseX, y) { return baseX }
+            if baseX > 0 && ink(baseX - 1, y) { return baseX - 1 }
+            if baseX + 1 < width && ink(baseX + 1, y) { return baseX + 1 }
+            return nil
+        }
+
         @inline(__always) func localWidthAt(_ x: Int, _ y: Int) -> Int {
             if thinWidth <= 2 {
                 var w = 0
@@ -84,6 +93,8 @@ enum VerticalStrokeEraser {
             var runInkCount = 0
             var runWidthSum = 0
             var gapCount = 0
+            var runPixels: [(Int, Int)] = []
+            runPixels.reserveCapacity(256)
 
             func flushRun(at yEndExclusive: Int) {
                 guard let ys = runStart else { return }
@@ -91,10 +102,11 @@ enum VerticalStrokeEraser {
                 let runLen = ye - ys
                 if runLen >= minRun && runInkCount > 0 {
                     let avgW = Double(runWidthSum) / Double(runInkCount)
-                    if avgW <= Double(maxWidth) {
-                        for yy in ys..<ye {
-                            if yy >= y0 && yy <= y1, ink(x, yy) {
-                                strokeMask[idx(x, yy)] = 1
+                    let widthLimit = runLen >= longRunThreshold ? Double(maxWidthLong) : Double(maxWidth)
+                    if avgW <= widthLimit {
+                        for (px, py) in runPixels {
+                            if py >= y0 && py <= y1 {
+                                strokeMask[idx(px, py)] = 1
                             }
                         }
                     }
@@ -103,14 +115,16 @@ enum VerticalStrokeEraser {
                 runInkCount = 0
                 runWidthSum = 0
                 gapCount = 0
+                runPixels.removeAll(keepingCapacity: true)
             }
 
             for y in y0...y1 {
-                if ink(x, y) {
+                if let nx = (runStart != nil ? findInkNeighborX(x, y) : (ink(x, y) ? x : nil)) {
                     if runStart == nil { runStart = y }
                     runInkCount += 1
-                    runWidthSum += localWidthAt(x, y)
+                    runWidthSum += localWidthAt(nx, y)
                     gapCount = 0
+                    runPixels.append((nx, y))
                 } else if runStart != nil {
                     gapCount += 1
                     if gapCount > maxGap {
@@ -210,10 +224,12 @@ enum VerticalStrokeEraser {
             for y in y0...y1 {
                 for x in x0...x1 {
                     if strokeMask[idx(x, y)] == 0 { continue }
-                    let xx0 = max(x0, x - dilateR)
-                    let xx1 = min(x1, x + dilateR)
-                    let yy0 = max(y0, y - dilateR)
-                    let yy1 = min(y1, y + dilateR)
+                    let dx = 1
+                    let dy = dilateR + 1
+                    let xx0 = max(x0, x - dx)
+                    let xx1 = min(x1, x + dx)
+                    let yy0 = max(y0, y - dy)
+                    let yy1 = min(y1, y + dy)
                     for yy in yy0...yy1 {
                         let row = yy * width
                         for xx in xx0...xx1 {
@@ -223,6 +239,39 @@ enum VerticalStrokeEraser {
                 }
             }
             strokeMask = dilated
+        }
+
+        // ------------------------------------------------------------
+        // Row wipe: if a row has a run of >=3 touching/near-touching stroke pixels, remove whole row
+        // ------------------------------------------------------------
+        let rowRunThreshold = 3
+        let rowRunMaxGap = 1
+        for y in y0...y1 {
+            var run = 0
+            var gap = 0
+            var hasLongRun = false
+            let row = y * width
+            for x in x0...x1 {
+                if strokeMask[row + x] != 0 {
+                    run += 1
+                    gap = 0
+                    if run >= rowRunThreshold {
+                        hasLongRun = true
+                        break
+                    }
+                } else {
+                    gap += 1
+                    if gap > rowRunMaxGap {
+                        run = 0
+                        gap = 0
+                    }
+                }
+            }
+            if hasLongRun {
+                for x in x0...x1 {
+                    strokeMask[row + x] = 1
+                }
+            }
         }
 
         // ------------------------------------------------------------
