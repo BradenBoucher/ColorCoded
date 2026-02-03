@@ -335,8 +335,10 @@ enum OfflineScoreColorizer {
         // ------------------------------------------------------------
         if !strongNotehead, !barlineXs.isEmpty {
             let cx = rect.midX
-            let nearBarline = barlineXs.contains { abs($0 - cx) < spacing * 0.16 }
+            let nearBarline = barlineXs.contains { abs($0 - cx) < spacing * 0.22 }
             if nearBarline {
+                let smallish = max(w, h) < spacing * 0.65
+                if smallish && (strokeOverlap > 0.04 || colStem || lineLike) { return true }
                 let tallish = h > spacing * 0.60
                 if tallish && strokeOverlap > 0.06 { return true }
                 if colStem { return true }
@@ -393,6 +395,10 @@ enum OfflineScoreColorizer {
                 if h > spacing * 0.26 { return true }
             }
 
+            if strokeOverlap > 0.22 && max(w, h) < spacing * 0.60 {
+                return true
+            }
+
             let tallEnough = h > spacing * 0.55
             let notWide = aspect < 1.05
             if tallEnough && notWide && strokeOverlap > 0.08 {
@@ -406,6 +412,20 @@ enum OfflineScoreColorizer {
 
             if h > spacing * 1.55 && strokeOverlap > 0.26 {
                 return true
+            }
+        }
+
+        // ------------------------------------------------------------
+        // RULE 6) Mid-gap vertical artifacts (between treble/bass)
+        // ------------------------------------------------------------
+        if !strongNotehead {
+            let trebleBottom = system.trebleLines.sorted().last ?? 0
+            let bassTop = system.bassLines.sorted().first ?? 0
+            if rect.midY > trebleBottom && rect.midY < bassTop {
+                let skinny = aspect < 0.90 || aspect > 1.35
+                if skinny && (strokeOverlap > 0.06 || colStem || lineLike) {
+                    return true
+                }
             }
         }
 
