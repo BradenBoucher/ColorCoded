@@ -236,6 +236,8 @@ enum OfflineScoreColorizer {
             binary = result.binaryWithoutStrokes
         }
 
+        binary = BinaryNoiseCleaner.clean(binary: binary, width: w, height: h, spacing: spacing)
+
         guard let cleanedCG = buildBinaryCGImage(from: binary, width: w, height: h) else { return nil }
         return makePlatformImage(from: cleanedCG)
     }
