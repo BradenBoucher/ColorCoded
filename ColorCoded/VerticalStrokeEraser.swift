@@ -31,12 +31,9 @@ enum VerticalStrokeEraser {
 
         var strokeMask = [UInt8](repeating: 0, count: width * height)
 
-        let gapMax = 2
-
         for x in x0..<x1 {
             var runStart = y0
             var runLength = 0
-            var gapCount = 0
 
             func commitRun(endYExclusive: Int) {
                 guard runLength >= minRun else { return }
@@ -61,17 +58,9 @@ enum VerticalStrokeEraser {
                 if binary[idx] != 0 {
                     if runLength == 0 { runStart = y }
                     runLength += 1
-                    gapCount = 0
                 } else if runLength > 0 {
-                    gapCount += 1
-                    if gapCount <= gapMax {
-                        runLength += 1
-                    } else {
-                        let runEnd = y - gapCount + 1
-                        commitRun(endYExclusive: runEnd)
-                        runLength = 0
-                        gapCount = 0
-                    }
+                    commitRun(endYExclusive: y)
+                    runLength = 0
                 }
             }
             if runLength > 0 {
