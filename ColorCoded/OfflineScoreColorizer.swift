@@ -91,7 +91,17 @@ enum OfflineScoreColorizer {
                             barlines: barlines,
                             fallbackSpacing: staffModel?.lineSpacing ?? 12.0,
                             cgImage: image.cgImageSafe,
-                            binaryOverride: strokeClean.map { ($0.binary, $0.width, $0.height) }
+                            binaryOverride: {
+                                if let cleaned = cleanedImage, let cg = cleaned.cgImageSafe {
+                                    let (bin, w, h) = buildBinaryInkMap(from: cg, lumThreshold: 175)
+                                    return (bin, w, h)
+                                } else if let cg = image.cgImageSafe {
+                                    let (bin, w, h) = buildBinaryInkMap(from: cg, lumThreshold: 175)
+                                    return (bin, w, h)
+                                } else {
+                                    return nil
+                                }
+                            }()
                         )
 
                         let colored = drawOverlays(
@@ -958,7 +968,7 @@ enum OfflineScoreColorizer {
             sxy += dx * dy
         }
         sxx /= Double(ptsX.count)
-        syy /= Double(ptsY.count)
+        syy /= Double(ptsX.count)
         sxy /= Double(ptsX.count)
 
         // eigenvalues of 2x2 covariance
