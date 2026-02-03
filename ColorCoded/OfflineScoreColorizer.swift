@@ -5,6 +5,8 @@ import CoreGraphics
 
 #if canImport(UIKit)
 import UIKit
+#elseif canImport(AppKit)
+import AppKit
 #endif
 
 enum OfflineScoreColorizer {
@@ -59,8 +61,15 @@ enum OfflineScoreColorizer {
                         let staffModel = await StaffDetector.detectStaff(in: image)
                         let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
 
+                        let baseImage = image
+                        let cleanedImage = await buildStrokeCleanedImage(
+                            baseImage: baseImage,
+                            staffModel: staffModel,
+                            systems: systems
+                        )
+
                         // High recall note candidates
-                        let detection = await NoteheadDetector.detectDebug(in: image)
+                        let detection = await NoteheadDetector.detectDebug(in: cleanedImage ?? baseImage)
 
                         // Barlines
                         let barlines = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
@@ -133,6 +142,114 @@ enum OfflineScoreColorizer {
             page.draw(with: .mediaBox, to: ctx.cgContext)
             ctx.cgContext.restoreGState()
         }
+        #else
+        return nil
+        #endif
+    }
+
+    // MARK: - Stroke erasing (pre-contour cleanup)
+
+    private static func buildStrokeCleanedImage(baseImage: PlatformImage,
+                                                staffModel: StaffModel?,
+                                                systems: [SystemBlock]) async -> PlatformImage? {
+        guard let cg = baseImage.cgImageSafe, !systems.isEmpty else { return nil }
+        let spacing = max(6.0, staffModel?.lineSpacing ?? 12.0)
+
+        let rawCandidates = await NoteheadDetector.detectNoteheads(in: baseImage)
+
+        return buildStrokeCleanedImage(
+            cgImage: cg,
+            spacing: spacing,
+            systems: systems,
+            protectRects: rawCandidates
+        )
+    }
+
+    private static func buildStrokeCleanedImage(cgImage: CGImage,
+                                                spacing: CGFloat,
+                                                systems: [SystemBlock],
+                                                protectRects: [CGRect]) -> PlatformImage? {
+        let (bin, w, h) = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
+        var binary = bin
+
+        var protectMask = [UInt8](repeating: 0, count: w * h)
+        let u = max(7.0, spacing)
+        let minDim = 0.35 * u
+        let maxDim = 1.8 * u
+
+        for rect in protectRects {
+            guard rect.width >= minDim, rect.height >= minDim else { continue }
+            guard rect.width <= maxDim, rect.height <= maxDim else { continue }
+            let expanded = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u)
+            markMask(&protectMask, rect: expanded, width: w, height: h)
+        }
+
+        for system in systems {
+            let result = VerticalStrokeEraser.eraseStrokes(
+                binary: binary,
+                width: w,
+                height: h,
+                systemRect: system.bbox,
+                spacing: spacing,
+                protectMask: protectMask
+            )
+            binary = result.binaryWithoutStrokes
+        }
+
+        guard let cleanedCG = buildBinaryCGImage(from: binary, width: w, height: h) else { return nil }
+        return makePlatformImage(from: cleanedCG)
+    }
+
+    private static func markMask(_ mask: inout [UInt8], rect: CGRect, width: Int, height: Int) {
+        let clipped = rect.intersection(CGRect(x: 0, y: 0, width: width, height: height))
+        guard clipped.width > 0, clipped.height > 0 else { return }
+        let x0 = max(0, Int(floor(clipped.minX)))
+        let y0 = max(0, Int(floor(clipped.minY)))
+        let x1 = min(width, Int(ceil(clipped.maxX)))
+        let y1 = min(height, Int(ceil(clipped.maxY)))
+        for y in y0..<y1 {
+            let row = y * width
+            for x in x0..<x1 {
+                mask[row + x] = 1
+            }
+        }
+    }
+
+    private static func buildBinaryCGImage(from binary: [UInt8], width: Int, height: Int) -> CGImage? {
+        guard binary.count == width * height else { return nil }
+        var rgba = [UInt8](repeating: 255, count: width * height * 4)
+        for y in 0..<height {
+            let row = y * width
+            let rowRGBA = y * width * 4
+            for x in 0..<width {
+                let idx = row + x
+                if binary[idx] != 0 {
+                    let rgbaIdx = rowRGBA + x * 4
+                    rgba[rgbaIdx] = 0
+                    rgba[rgbaIdx + 1] = 0
+                    rgba[rgbaIdx + 2] = 0
+                    rgba[rgbaIdx + 3] = 255
+                }
+            }
+        }
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: &rgba,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        return ctx.makeImage()
+    }
+
+    private static func makePlatformImage(from cgImage: CGImage) -> PlatformImage? {
+        #if canImport(UIKit)
+        return UIImage(cgImage: cgImage)
+        #elseif canImport(AppKit)
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         #else
         return nil
         #endif
