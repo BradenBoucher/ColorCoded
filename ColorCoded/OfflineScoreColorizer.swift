@@ -231,7 +231,7 @@ enum OfflineScoreColorizer {
                     width: w,
                     height: h
                 )
-                print("StrokeErase erased=\(result.erasedCount) strokeCount=\(result.strokeCount)")
+                print("StrokeErase system erased=\(result.erasedCount) strokeTotal=\(result.totalStrokeCount)")
             }
             binary = result.binaryWithoutStrokes
         }
