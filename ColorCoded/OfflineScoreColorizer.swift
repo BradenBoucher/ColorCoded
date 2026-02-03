@@ -8,6 +8,20 @@ import UIKit
 #endif
 
 enum OfflineScoreColorizer {
+    private enum RejectTuning {
+        static let ledgerRunFrac: Double = 0.70
+        static let ledgerFillMax: Double = 0.12
+        static let tailFillMax: Double = 0.10
+        static let tailAsymMin: Double = 0.55
+        static let axisRatioMin: Double = 3.2
+        static let overlapExpandedMin: Double = 0.22
+    }
+
+    private struct PatchMetrics {
+        let fillRatio: Double
+        let centerRowMaxRunFrac: Double
+        let lrAsymmetry: Double
+    }
 
     enum ColorizeError: LocalizedError {
         case cannotOpenPDF
@@ -326,17 +340,56 @@ enum OfflineScoreColorizer {
             thickness = meanStrokeThickness(rect, bin: bin, pageW: pageW, pageH: pageH)
         }
 
+        let u = max(7.0, spacing)
+        let overlapExpanded = vMask.map {
+            let expanded = rect.insetBy(dx: -0.35 * u, dy: -0.20 * u).intersection(system.bbox)
+            return Double($0.overlapRatio(with: expanded))
+        } ?? 0
+
         // If something is very notehead-like, be reluctant to reject it.
         // (This protects recall.)
         let strongNotehead = head.shapeScore > 0.72 && strokeOverlap < 0.18 && !colStem
+
+        let ledgerMetrics: PatchMetrics? = {
+            guard let binaryPage else { return nil }
+            let (bin, pageW, pageH) = binaryPage
+            let ledgerRect = rect.insetBy(dx: -0.25 * u, dy: -0.10 * u).intersection(system.bbox)
+            return computePatchMetrics(rect: ledgerRect, bin: bin, pageW: pageW, pageH: pageH)
+        }()
+
+        if let ledgerMetrics, !strongNotehead {
+            if ledgerMetrics.centerRowMaxRunFrac > RejectTuning.ledgerRunFrac,
+               ledgerMetrics.fillRatio < RejectTuning.ledgerFillMax {
+                return true
+            }
+        }
+
+        let tailMetrics: PatchMetrics? = {
+            guard let binaryPage else { return nil }
+            let (bin, pageW, pageH) = binaryPage
+            let tailRect = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u).intersection(system.bbox)
+            return computePatchMetrics(rect: tailRect, bin: bin, pageW: pageW, pageH: pageH)
+        }()
+
+        if let tailMetrics, !strongNotehead {
+            let isAsymmetric = tailMetrics.lrAsymmetry > RejectTuning.tailAsymMin
+            let isLowFill = tailMetrics.fillRatio < RejectTuning.tailFillMax
+            let axisRatioHit = ecc > RejectTuning.axisRatioMin && tailMetrics.fillRatio < 0.18
+            let overlapHit = overlapExpanded > RejectTuning.overlapExpandedMin && tailMetrics.fillRatio < 0.20
+            if (isLowFill && isAsymmetric) || axisRatioHit || overlapHit {
+                return true
+            }
+        }
 
         // ------------------------------------------------------------
         // RULE 0) Barline neighborhood veto (kills barline spam)
         // ------------------------------------------------------------
         if !strongNotehead, !barlineXs.isEmpty {
             let cx = rect.midX
-            let nearBarline = barlineXs.contains { abs($0 - cx) < spacing * 0.16 }
+            let nearBarline = barlineXs.contains { abs($0 - cx) < spacing * 0.22 }
             if nearBarline {
+                let smallish = max(w, h) < spacing * 0.65
+                if smallish && (strokeOverlap > 0.04 || colStem || lineLike) { return true }
                 let tallish = h > spacing * 0.60
                 if tallish && strokeOverlap > 0.06 { return true }
                 if colStem { return true }
@@ -393,6 +446,10 @@ enum OfflineScoreColorizer {
                 if h > spacing * 0.26 { return true }
             }
 
+            if strokeOverlap > 0.22 && max(w, h) < spacing * 0.60 {
+                return true
+            }
+
             let tallEnough = h > spacing * 0.55
             let notWide = aspect < 1.05
             if tallEnough && notWide && strokeOverlap > 0.08 {
@@ -410,6 +467,20 @@ enum OfflineScoreColorizer {
         }
 
         // ------------------------------------------------------------
+        // RULE 6) Mid-gap vertical artifacts (between treble/bass)
+        // ------------------------------------------------------------
+        if !strongNotehead {
+            let trebleBottom = system.trebleLines.sorted().last ?? 0
+            let bassTop = system.bassLines.sorted().first ?? 0
+            if rect.midY > trebleBottom && rect.midY < bassTop {
+                let skinny = aspect < 0.90 || aspect > 1.35
+                if skinny && (strokeOverlap > 0.06 || colStem || lineLike) {
+                    return true
+                }
+            }
+        }
+
+        // ------------------------------------------------------------
         // RULE 5) Almost empty contour artifacts
         // ------------------------------------------------------------
         if !strongNotehead, inkExtent < 0.08 {
@@ -417,6 +488,56 @@ enum OfflineScoreColorizer {
         }
 
         return false
+    }
+
+    private static func computePatchMetrics(rect: CGRect, bin: [UInt8], pageW: Int, pageH: Int) -> PatchMetrics? {
+        let clipped = rect.intersection(CGRect(x: 0, y: 0, width: pageW, height: pageH))
+        guard clipped.width > 1, clipped.height > 1 else { return nil }
+
+        let x0 = max(0, Int(floor(clipped.minX)))
+        let y0 = max(0, Int(floor(clipped.minY)))
+        let x1 = min(pageW, Int(ceil(clipped.maxX)))
+        let y1 = min(pageH, Int(ceil(clipped.maxY)))
+        let w = max(1, x1 - x0)
+        let h = max(1, y1 - y0)
+
+        var ink = 0
+        var leftInk = 0
+        var rightInk = 0
+        let midX = x0 + w / 2
+
+        var maxRun = 0
+        let centerY = y0 + h / 2
+        let rowCandidates = [centerY - 1, centerY, centerY + 1]
+
+        for y in y0..<y1 {
+            let row = y * pageW
+            var run = 0
+            let trackRun = rowCandidates.contains(y)
+            for x in x0..<x1 {
+                let isInk = bin[row + x] != 0
+                if isInk {
+                    ink += 1
+                    if x < midX { leftInk += 1 } else { rightInk += 1 }
+                }
+                if trackRun {
+                    if isInk {
+                        run += 1
+                        maxRun = max(maxRun, run)
+                    } else {
+                        run = 0
+                    }
+                }
+            }
+        }
+
+        let area = max(1, w * h)
+        let fillRatio = Double(ink) / Double(area)
+        let runFrac = Double(maxRun) / Double(max(1, w))
+        let totalInk = max(1, leftInk + rightInk)
+        let lrAsym = Double(abs(leftInk - rightInk)) / Double(totalInk)
+
+        return PatchMetrics(fillRatio: fillRatio, centerRowMaxRunFrac: runFrac, lrAsymmetry: lrAsym)
     }
 
     private static func minDistanceToAnyStaffLine(y: CGFloat, system: SystemBlock) -> CGFloat {
