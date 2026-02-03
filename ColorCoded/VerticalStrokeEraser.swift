@@ -242,29 +242,22 @@ enum VerticalStrokeEraser {
         }
 
         // ------------------------------------------------------------
-        // Row wipe: if a row has a run of >=2 touching/near-touching stroke pixels, remove whole row
+        // Row wipe: if a row has a run of >=5 touching stroke pixels, remove whole row
         // ------------------------------------------------------------
-        let rowRunThreshold = 2
-        let rowRunMaxGap = 2
+        let rowRunThreshold = 5
         for y in y0...y1 {
             var run = 0
-            var gap = 0
             var hasLongRun = false
             let row = y * width
             for x in x0...x1 {
                 if strokeMask[row + x] != 0 {
                     run += 1
-                    gap = 0
                     if run >= rowRunThreshold {
                         hasLongRun = true
                         break
                     }
                 } else {
-                    gap += 1
-                    if gap > rowRunMaxGap {
-                        run = 0
-                        gap = 0
-                    }
+                    run = 0
                 }
             }
             if hasLongRun {
