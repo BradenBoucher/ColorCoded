@@ -7,6 +7,7 @@ import UIKit
 #endif
 
 enum OfflineScoreColorizer {
+    static let useCCNoteheads = true
 
     enum ColorizeError: LocalizedError {
         case cannotOpenPDF
@@ -176,8 +177,55 @@ enum OfflineScoreColorizer {
                 return r
             }
 
+            var candidateRects = systemRects
+            if useCCNoteheads, let binaryPage {
+                let (bin, pageW, pageH) = binaryPage
+                let mask = DirectionalStrokeMask.build(
+                    from: bin,
+                    pageWidth: pageW,
+                    pageHeight: pageH,
+                    roi: system.bbox,
+                    spacing: spacing
+                )
+
+                if mask.width > 0, mask.height > 0 {
+                    let roiCount = mask.width * mask.height
+                    var headOnly = [UInt8](repeating: 0, count: roiCount)
+                    for y in 0..<mask.height {
+                        let pageRow = (Int(mask.origin.y) + y) * pageW
+                        let localRow = y * mask.width
+                        for x in 0..<mask.width {
+                            let pageIdx = pageRow + Int(mask.origin.x) + x
+                            if bin[pageIdx] != 0 && mask.combinedMask[localRow + x] == 0 {
+                                headOnly[localRow + x] = 1
+                            }
+                        }
+                    }
+
+                    let components = ConnectedComponents.extract(
+                        from: headOnly,
+                        width: mask.width,
+                        height: mask.height,
+                        origin: mask.origin
+                    )
+                    let pad = spacing * 0.08
+                    let ccRects = components
+                        .filter { $0.isLikelyNotehead(spacing: spacing) }
+                        .map { $0.bbox.insetBy(dx: -pad, dy: -pad) }
+
+                    if !ccRects.isEmpty, !systemRects.isEmpty {
+                        let minNeeded = max(1, Int(ceil(Double(systemRects.count) * 0.4)))
+                        if ccRects.count >= minNeeded {
+                            candidateRects = ccRects
+                        }
+                    } else if !ccRects.isEmpty, systemRects.isEmpty {
+                        candidateRects = ccRects
+                    }
+                }
+            }
+
             // Remove symbols region only (safe)
-            let noSymbols = systemRects.filter { r in
+            let noSymbols = candidateRects.filter { r in
                 !symbolZone.contains(CGPoint(x: r.midX, y: r.midY))
             }
 
