@@ -79,7 +79,8 @@ enum OfflineScoreColorizer {
                             systems: systems,
                             barlines: barlines,
                             fallbackSpacing: staffModel?.lineSpacing ?? 12.0,
-                            cgImage: image.cgImageSafe
+                            cgImage: image.cgImageSafe,
+                            binaryOverride: strokeClean.map { ($0.binary, $0.width, $0.height) }
                         )
 
                         let colored = drawOverlays(
@@ -261,7 +262,8 @@ enum OfflineScoreColorizer {
                                                   systems: [SystemBlock],
                                                   barlines: [CGRect],
                                                   fallbackSpacing: CGFloat,
-                                                  cgImage: CGImage?) -> [CGRect] {
+                                                  cgImage: CGImage?,
+                                                  binaryOverride: ([UInt8], Int, Int)?) -> [CGRect] {
         guard !noteheads.isEmpty else { return [] }
 
         // If systems not found, only do dedupe (avoid losing notes)
@@ -270,7 +272,7 @@ enum OfflineScoreColorizer {
         }
 
         // Build binary page once (reused across systems)
-        let binaryPage: ([UInt8], Int, Int)? = {
+        let binaryPage: ([UInt8], Int, Int)? = binaryOverride ?? {
             guard let cgImage else { return nil }
             return buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         }()
@@ -743,10 +745,50 @@ enum OfflineScoreColorizer {
                 ctx.cgContext.setStrokeColor(UIColor.systemTeal.withAlphaComponent(0.55).cgColor)
                 for rect in barlines { ctx.cgContext.stroke(rect) }
             }
+
+            if debugStrokeErase, let maskData = debugMaskData,
+               let overlay = buildMaskOverlayImage(maskData: maskData, size: image.size) {
+                ctx.cgContext.setAlpha(0.25)
+                ctx.cgContext.draw(overlay, in: CGRect(origin: .zero, size: image.size))
+            }
         }
         #else
         return image
         #endif
+    }
+
+    private static func buildMaskOverlayImage(maskData: DebugMaskData, size: CGSize) -> CGImage? {
+        let w = maskData.width
+        let h = maskData.height
+        guard maskData.strokeMask.count == w * h, maskData.protectMask.count == w * h else { return nil }
+        var rgba = [UInt8](repeating: 0, count: w * h * 4)
+        for y in 0..<h {
+            let row = y * w
+            let rowRGBA = y * w * 4
+            for x in 0..<w {
+                let idx = row + x
+                let rgbaIdx = rowRGBA + x * 4
+                if maskData.strokeMask[idx] != 0 {
+                    rgba[rgbaIdx] = 255
+                    rgba[rgbaIdx + 3] = 120
+                }
+                if maskData.protectMask[idx] != 0 {
+                    rgba[rgbaIdx + 1] = 255
+                    rgba[rgbaIdx + 3] = max(rgba[rgbaIdx + 3], 120)
+                }
+            }
+        }
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: &rgba,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: w * 4,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        return ctx.makeImage()
     }
 
     // MARK: - Binary helpers
