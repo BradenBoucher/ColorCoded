@@ -900,6 +900,16 @@ enum OfflineScoreColorizer {
                 for rect in barlines { ctx.cgContext.stroke(rect) }
             }
 
+            // Debug marker: draw an X at the top-left of the page.
+            let markerSize = max(6.0, baseRadius * 0.35)
+            ctx.cgContext.setStrokeColor(UIColor.systemRed.withAlphaComponent(0.8).cgColor)
+            ctx.cgContext.setLineWidth(max(1.5, baseRadius * 0.18))
+            ctx.cgContext.move(to: CGPoint(x: 4, y: 4))
+            ctx.cgContext.addLine(to: CGPoint(x: 4 + markerSize, y: 4 + markerSize))
+            ctx.cgContext.move(to: CGPoint(x: 4 + markerSize, y: 4))
+            ctx.cgContext.addLine(to: CGPoint(x: 4, y: 4 + markerSize))
+            ctx.cgContext.strokePath()
+
             if debugStrokeErase, let maskData = debugMaskData,
                let overlay = buildMaskOverlayImage(maskData: maskData, size: image.size) {
                 ctx.cgContext.setAlpha(0.25)
