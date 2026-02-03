@@ -21,14 +21,6 @@ private struct DebugMaskData {
 private var debugMaskData: DebugMaskData?
 
 enum OfflineScoreColorizer {
-    private struct StrokeCleanResult {
-        let image: PlatformImage
-        let binary: [UInt8]
-        let width: Int
-        let height: Int
-        let strokeMask: [UInt8]
-        let protectMask: [UInt8]
-    }
     private enum RejectTuning {
         static let ledgerRunFrac: Double = 0.70
         static let ledgerFillMax: Double = 0.12
@@ -81,18 +73,11 @@ enum OfflineScoreColorizer {
                         let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
 
                         let baseImage = image
-                        let strokeClean = await buildStrokeCleanedImage(
+                        let cleanedImage = await buildStrokeCleanedImage(
                             baseImage: baseImage,
                             staffModel: staffModel,
                             systems: systems
                         )
-                        let cleanedImage = strokeClean?.image
-                        if debugStrokeErase {
-                            print("StrokeErase cleanedImage used: \(cleanedImage != nil)")
-                        }
-                        if cleanedImage == nil {
-                            debugMaskData = nil
-                        }
 
                         // High recall note candidates
                         let detection = await NoteheadDetector.detectDebug(in: cleanedImage ?? baseImage)
@@ -178,7 +163,7 @@ enum OfflineScoreColorizer {
 
     private static func buildStrokeCleanedImage(baseImage: PlatformImage,
                                                 staffModel: StaffModel?,
-                                                systems: [SystemBlock]) async -> StrokeCleanResult? {
+                                                systems: [SystemBlock]) async -> PlatformImage? {
         guard let cg = baseImage.cgImageSafe, !systems.isEmpty else { return nil }
         let spacing = max(6.0, staffModel?.lineSpacing ?? 12.0)
 
@@ -195,38 +180,23 @@ enum OfflineScoreColorizer {
     private static func buildStrokeCleanedImage(cgImage: CGImage,
                                                 spacing: CGFloat,
                                                 systems: [SystemBlock],
-                                                protectRects: [CGRect]) -> StrokeCleanResult? {
+                                                protectRects: [CGRect]) -> PlatformImage? {
         let (bin, w, h) = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         var binary = bin
 
         var protectMask = [UInt8](repeating: 0, count: w * h)
-        var strokeMask = [UInt8](repeating: 0, count: w * h)
         let u = max(7.0, spacing)
         let minDim = 0.35 * u
         let maxDim = 1.8 * u
-
-        let vMasks = systems.map { system in
-            VerticalStrokeMask.build(from: bin, width: w, height: h, roi: system.bbox, minRun: max(3, Int((spacing * 0.80).rounded())))
-        }
 
         for rect in protectRects {
             guard rect.width >= minDim, rect.height >= minDim else { continue }
             guard rect.width <= maxDim, rect.height <= maxDim else { continue }
             let expanded = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u)
-            if shouldProtectRect(rect: rect,
-                                 expanded: expanded,
-                                 binary: bin,
-                                 pageW: w,
-                                 pageH: h,
-                                 vMasks: vMasks,
-                                 systems: systems,
-                                 spacing: spacing) {
-                markMask(&protectMask, rect: expanded, width: w, height: h)
-            }
+            markMask(&protectMask, rect: expanded, width: w, height: h)
         }
 
-        for (idx, system) in systems.enumerated() {
-            let before = countInk(in: binary, width: w, height: h, rect: system.bbox)
+        for system in systems {
             let result = VerticalStrokeEraser.eraseStrokes(
                 binary: binary,
                 width: w,
@@ -236,21 +206,10 @@ enum OfflineScoreColorizer {
                 protectMask: protectMask
             )
             binary = result.binaryWithoutStrokes
-            mergeMask(&strokeMask, with: result.strokeMask)
-            let after = countInk(in: binary, width: w, height: h, rect: system.bbox)
-            if debugStrokeErase {
-                let delta = before - after
-                print("StrokeErase system \(idx): before=\(before) after=\(after) Δ=\(delta)")
-            }
         }
 
         guard let cleanedCG = buildBinaryCGImage(from: binary, width: w, height: h) else { return nil }
-        guard let image = makePlatformImage(from: cleanedCG) else { return nil }
-        if debugStrokeErase {
-            print("StrokeErase cleanedImage base=\(cgImage.width)x\(cgImage.height) cleaned=\(cleanedCG.width)x\(cleanedCG.height)")
-        }
-        debugMaskData = DebugMaskData(strokeMask: strokeMask, protectMask: protectMask, width: w, height: h)
-        return StrokeCleanResult(image: image, binary: binary, width: w, height: h, strokeMask: strokeMask, protectMask: protectMask)
+        return makePlatformImage(from: cleanedCG)
     }
 
     private static func markMask(_ mask: inout [UInt8], rect: CGRect, width: Int, height: Int) {
@@ -266,63 +225,6 @@ enum OfflineScoreColorizer {
                 mask[row + x] = 1
             }
         }
-    }
-
-    private static func mergeMask(_ mask: inout [UInt8], with addition: [UInt8]) {
-        guard !addition.isEmpty, mask.count == addition.count else { return }
-        for i in 0..<mask.count where addition[i] != 0 {
-            mask[i] = 1
-        }
-    }
-
-    private static func countInk(in binary: [UInt8], width: Int, height: Int, rect: CGRect) -> Int {
-        let clipped = rect.intersection(CGRect(x: 0, y: 0, width: width, height: height))
-        guard clipped.width > 0, clipped.height > 0 else { return 0 }
-        let x0 = max(0, Int(floor(clipped.minX)))
-        let y0 = max(0, Int(floor(clipped.minY)))
-        let x1 = min(width, Int(ceil(clipped.maxX)))
-        let y1 = min(height, Int(ceil(clipped.maxY)))
-        var count = 0
-        for y in y0..<y1 {
-            let row = y * width
-            for x in x0..<x1 {
-                if binary[row + x] != 0 { count += 1 }
-            }
-        }
-        return count
-    }
-
-    private static func shouldProtectRect(rect: CGRect,
-                                          expanded: CGRect,
-                                          binary: [UInt8],
-                                          pageW: Int,
-                                          pageH: Int,
-                                          vMasks: [VerticalStrokeMask?],
-                                          systems: [SystemBlock],
-                                          spacing: CGFloat) -> Bool {
-        let u = max(7.0, spacing)
-        let expandedRect = expanded.insetBy(dx: -0.30 * u, dy: -0.15 * u)
-        let overlap = bestOverlap(rect: expandedRect, vMasks: vMasks, systems: systems)
-        if overlap >= 0.12 { return false }
-
-        let pca = lineLikenessPCA(rect, bin: binary, pageW: pageW, pageH: pageH)
-        if pca.eccentricity >= 3.8 { return false }
-
-        let fill = rectInkExtent(rect, bin: binary, pageW: pageW, pageH: pageH)
-        if fill <= 0.12 { return false }
-
-        return true
-    }
-
-    private static func bestOverlap(rect: CGRect,
-                                    vMasks: [VerticalStrokeMask?],
-                                    systems: [SystemBlock]) -> CGFloat {
-        var best: CGFloat = 0
-        for (idx, system) in systems.enumerated() {
-            guard system.bbox.intersects(rect), let mask = vMasks[idx] else { continue }
-            best = max(best, mask.overlapRatio(with: rect))
-        }
-        return best
     }
 
     private static func buildBinaryCGImage(from binary: [UInt8], width: Int, height: Int) -> CGImage? {
