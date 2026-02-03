@@ -1,118 +1,154 @@
+import Foundation
 import CoreGraphics
 
+/// Detect + erase thin vertical strokes (stems/tails/barline fragments) from a binary ink map.
+/// binary: 1 = ink, 0 = white
 enum VerticalStrokeEraser {
+
     struct Result {
-        let strokeMask: [UInt8]
         let binaryWithoutStrokes: [UInt8]
+        let strokeMask: [UInt8]     // full-page mask, 1 where stroke detected
+        let erasedCount: Int
+        let strokeCount: Int
     }
 
+    /// binary: 1=ink, 0=white
     static func eraseStrokes(binary: [UInt8],
                              width: Int,
                              height: Int,
                              systemRect: CGRect,
                              spacing: CGFloat,
                              protectMask: [UInt8]) -> Result {
-        guard width > 0, height > 0, binary.count == width * height else {
-            return Result(strokeMask: [], binaryWithoutStrokes: binary)
+
+        guard binary.count == width * height,
+              protectMask.count == width * height else {
+            return Result(binaryWithoutStrokes: binary,
+                          strokeMask: [UInt8](repeating: 0, count: width * height),
+                          erasedCount: 0,
+                          strokeCount: 0)
         }
 
-        let clipped = systemRect.intersection(CGRect(x: 0, y: 0, width: width, height: height))
-        guard clipped.width > 1, clipped.height > 1 else {
-            return Result(strokeMask: [], binaryWithoutStrokes: binary)
+        let u = max(6.0, spacing)
+
+        // Tunables (these are intentionally aggressive to show visible change)
+        let minRun = max(8, Int((spacing * 1.8).rounded())) // stems/tails are long
+        let gapMax = 2                                      // bridge tiny gaps
+        let maxWidth3px = max(2, Int((0.16 * u).rounded())) // thin stroke test (2–3 px)
+        let dilateR = max(1, Int((0.06 * u).rounded()))     // 1–2 px
+
+        let roi = systemRect.intersection(CGRect(x: 0, y: 0, width: width, height: height))
+        if roi.width < 2 || roi.height < 2 {
+            return Result(binaryWithoutStrokes: binary,
+                          strokeMask: [UInt8](repeating: 0, count: width * height),
+                          erasedCount: 0,
+                          strokeCount: 0)
         }
 
-        let x0 = max(0, Int(floor(clipped.minX)))
-        let y0 = max(0, Int(floor(clipped.minY)))
-        let x1 = min(width, Int(ceil(clipped.maxX)))
-        let y1 = min(height, Int(ceil(clipped.maxY)))
+        let x0 = max(0, Int(floor(roi.minX)))
+        let y0 = max(0, Int(floor(roi.minY)))
+        let x1 = min(width - 1, Int(ceil(roi.maxX)))
+        let y1 = min(height - 1, Int(ceil(roi.maxY)))
 
-        let minRun = max(4, Int(round(spacing * 2.8)))
-        let maxWidth = max(2, Int(round(spacing * 0.10)))
+        @inline(__always) func isInk(_ x: Int, _ y: Int) -> Bool {
+            binary[y * width + x] != 0
+        }
+
+        // quick local width estimate around a point (helps avoid marking noteheads/beams)
+        @inline(__always) func localWidth(_ x: Int, _ y: Int) -> Int {
+            var c = 0
+            if x > 0 && isInk(x - 1, y) { c += 1 }
+            if isInk(x, y) { c += 1 }
+            if x + 1 < width && isInk(x + 1, y) { c += 1 }
+            return c
+        }
 
         var strokeMask = [UInt8](repeating: 0, count: width * height)
 
-        for x in x0..<x1 {
-            var runStart = y0
-            var runLength = 0
+        // 1) Detect thin vertical runs per column
+        for x in x0...x1 {
+            var runStart: Int? = nil
+            var runLen = 0
+            var gap = 0
+            var inkCount = 0
+            var widthSum = 0
 
-            func commitRun(endYExclusive: Int) {
-                guard runLength >= minRun else { return }
-                var thinCount = 0
-                for y in runStart..<endYExclusive {
-                    let row = y * width
-                    var widthCount = 0
-                    for xx in max(x - 1, x0)..<min(x + 2, x1) {
-                        if binary[row + xx] != 0 { widthCount += 1 }
+            func commit(endYExclusive: Int) {
+                guard let ys = runStart else { return }
+                let ye = endYExclusive
+                if runLen >= minRun && inkCount > 0 {
+                    let avgW = Double(widthSum) / Double(inkCount)
+                    if avgW <= Double(maxWidth3px) {
+                        for yy in ys..<ye {
+                            if isInk(x, yy) { strokeMask[yy * width + x] = 1 }
+                        }
                     }
-                    if widthCount <= maxWidth { thinCount += 1 }
                 }
-                let thinFrac = Double(thinCount) / Double(max(1, runLength))
-                guard thinFrac > 0.60 else { return }
-                for y in runStart..<endYExclusive {
-                    strokeMask[y * width + x] = 1
-                }
+                runStart = nil
+                runLen = 0
+                gap = 0
+                inkCount = 0
+                widthSum = 0
             }
 
-            for y in y0..<y1 {
-                let idx = y * width + x
-                if binary[idx] != 0 {
-                    if runLength == 0 { runStart = y }
-                    runLength += 1
-                } else if runLength > 0 {
-                    commitRun(endYExclusive: y)
-                    runLength = 0
+            for y in y0...y1 {
+                if isInk(x, y) {
+                    if runStart == nil { runStart = y }
+                    runLen += 1
+                    inkCount += 1
+                    widthSum += localWidth(x, y)
+                    gap = 0
+                } else if runStart != nil {
+                    gap += 1
+                    if gap <= gapMax {
+                        runLen += 1 // keep run alive
+                    } else {
+                        commit(endYExclusive: y - gap + 1)
+                    }
                 }
             }
-            if runLength > 0 {
-                commitRun(endYExclusive: y1)
-            }
+            if runStart != nil { commit(endYExclusive: y1 + 1) }
         }
 
-        let dilated = dilate(mask: strokeMask,
-                             width: width,
-                             height: height,
-                             rect: clipped,
-                             radius: max(1, Int(round(spacing * 0.06))))
+        // 2) Dilate stroke mask slightly so anti-aliased edges don’t survive
+        if dilateR > 0 {
+            var dilated = strokeMask
+            for y in y0...y1 {
+                for x in x0...x1 where strokeMask[y * width + x] != 0 {
+                    let xx0 = max(x0, x - dilateR)
+                    let xx1 = min(x1, x + dilateR)
+                    let yy0 = max(y0, y - dilateR)
+                    let yy1 = min(y1, y + dilateR)
+                    for yy in yy0...yy1 {
+                        let row = yy * width
+                        for xx in xx0...xx1 { dilated[row + xx] = 1 }
+                    }
+                }
+            }
+            strokeMask = dilated
+        }
 
-        var cleaned = binary
-        for y in y0..<y1 {
+        // 3) Erase: clear stroke pixels unless protected
+        var out = binary
+        var erased = 0
+        var strokeCount = 0
+
+        for y in y0...y1 {
             let row = y * width
-            for x in x0..<x1 {
+            for x in x0...x1 {
                 let idx = row + x
-                if dilated[idx] != 0 && protectMask[idx] == 0 {
-                    cleaned[idx] = 0
-                }
-            }
-        }
-
-        return Result(strokeMask: dilated, binaryWithoutStrokes: cleaned)
-    }
-
-    private static func dilate(mask: [UInt8],
-                               width: Int,
-                               height: Int,
-                               rect: CGRect,
-                               radius: Int) -> [UInt8] {
-        guard radius > 0 else { return mask }
-        var out = mask
-
-        let x0 = max(0, Int(floor(rect.minX)))
-        let y0 = max(0, Int(floor(rect.minY)))
-        let x1 = min(width, Int(ceil(rect.maxX)))
-        let y1 = min(height, Int(ceil(rect.maxY)))
-
-        for y in y0..<y1 {
-            for x in x0..<x1 {
-                guard mask[y * width + x] != 0 else { continue }
-                for yy in max(y - radius, y0)..<min(y + radius + 1, y1) {
-                    let row = yy * width
-                    for xx in max(x - radius, x0)..<min(x + radius + 1, x1) {
-                        out[row + xx] = 1
+                if strokeMask[idx] != 0 {
+                    strokeCount += 1
+                    if protectMask[idx] == 0 && out[idx] != 0 {
+                        out[idx] = 0
+                        erased += 1
                     }
                 }
             }
         }
 
-        return out
+        return Result(binaryWithoutStrokes: out,
+                      strokeMask: strokeMask,
+                      erasedCount: erased,
+                      strokeCount: strokeCount)
     }
 }

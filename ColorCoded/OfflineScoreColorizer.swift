@@ -202,6 +202,15 @@ enum OfflineScoreColorizer {
         for rect in protectRects {
             guard rect.width >= minDim, rect.height >= minDim else { continue }
             guard rect.width <= maxDim, rect.height <= maxDim else { continue }
+            let maskMinRun = max(6, Int((spacing * 1.6).rounded()))
+            if let pageMask = VerticalStrokeMask.build(from: binary,
+                                                       width: w,
+                                                       height: h,
+                                                       roi: rect.insetBy(dx: -u, dy: -u),
+                                                       minRun: maskMinRun) {
+                let overlapRect = rect.insetBy(dx: -0.30 * u, dy: -0.15 * u)
+                if pageMask.overlapRatio(with: overlapRect) > 0.14 { continue }
+            }
             let expanded = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u)
             markMask(&protectMask, rect: expanded, width: w, height: h)
         }
@@ -215,8 +224,19 @@ enum OfflineScoreColorizer {
                 spacing: spacing,
                 protectMask: protectMask
             )
+            if debugStrokeErase {
+                debugMaskData = DebugMaskData(
+                    strokeMask: result.strokeMask,
+                    protectMask: protectMask,
+                    width: w,
+                    height: h
+                )
+                print("StrokeErase erased=\(result.erasedCount) strokeCount=\(result.strokeCount)")
+            }
             binary = result.binaryWithoutStrokes
         }
+
+        binary = BinaryNoiseCleaner.clean(binary: binary, width: w, height: h, spacing: spacing)
 
         guard let cleanedCG = buildBinaryCGImage(from: binary, width: w, height: h) else { return nil }
         return makePlatformImage(from: cleanedCG)
