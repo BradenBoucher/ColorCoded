@@ -215,6 +215,15 @@ enum OfflineScoreColorizer {
                 spacing: spacing,
                 protectMask: protectMask
             )
+            if debugStrokeErase {
+                debugMaskData = DebugMaskData(
+                    strokeMask: result.strokeMask,
+                    protectMask: protectMask,
+                    width: w,
+                    height: h
+                )
+                print("StrokeErase system erased=\(result.erasedCount) strokeTotal=\(result.totalStrokeCount)")
+            }
             binary = result.binaryWithoutStrokes
         }
 
