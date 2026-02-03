@@ -3,8 +3,10 @@ import CoreGraphics
 enum NoteBlobSplitter {
 
     /// Split a candidate rect into multiple rects if multiple "ink peaks" exist.
-    /// Works best on a preprocessed (high contrast + staff-erased) CGImage,
-    /// but should still behave reasonably on raw images.
+    /// Stem-aware version:
+    /// - Rejects thin peaks (stems/barlines) so we don't create "note towers"
+    /// - Detects dominant vertical runs and avoids splitting in those regions
+    /// - Still allows stacked triads / close chords
     static func splitIfNeeded(rect: CGRect, cg: CGImage, maxSplits: Int = 6) -> [CGRect] {
 
         let imgW = CGFloat(cg.width)
@@ -32,15 +34,16 @@ enum NoteBlobSplitter {
 
         ctx.draw(crop, in: CGRect(x: 0, y: 0, width: w, height: h))
 
-        // NOTE:
-        // - Triads are often "TALL blobs" (multiple noteheads stacked in Y)
-        // - Chords can also be "WIDE blobs" (multiple noteheads in X)
-        //
-        // We'll attempt BOTH:
-        //   1) Wide split via column projection (existing idea)
-        //   2) Tall split via row projection (NEW — fixes triads)
+        // Slightly high threshold catches hollow + filled heads without requiring perfect binarization.
+        let threshold = 180
 
-        let threshold = 180 // slightly high; works for filled + hollow heads
+        // If the crop is basically a vertical stroke (barline/stem), DO NOT split it into "noteheads".
+        // This avoids towers that later snap to many staff steps.
+        if isDominantVerticalStroke(pixels: pixels, w: w, h: h, threshold: threshold) {
+            return [croppedRect]
+        }
+
+        // Attempt wide (X) split first
         let wideResult = trySplitWide(
             croppedRect: croppedRect,
             pixels: pixels,
@@ -49,9 +52,9 @@ enum NoteBlobSplitter {
             threshold: threshold,
             maxSplits: maxSplits
         )
-
         if wideResult.count >= 2 { return wideResult }
 
+        // Then tall (Y) split (triads / stacked heads)
         let tallResult = trySplitTall(
             croppedRect: croppedRect,
             pixels: pixels,
@@ -60,15 +63,11 @@ enum NoteBlobSplitter {
             threshold: threshold,
             maxSplits: maxSplits
         )
-
         if tallResult.count >= 2 { return tallResult }
 
-        // Fallback: force split if geometry strongly suggests multiple noteheads
-        // (works for cases where projections are weak due to blur/light gray ink)
+        // Fallback forced split (still stem-aware via the early veto)
         let ar = croppedRect.width / max(1, croppedRect.height)
 
-        // Estimate "single head size" from the smaller dimension, but avoid
-        // overestimating when stems/beams make the blob very tall.
         let minDim = min(croppedRect.width, croppedRect.height)
         let estSingleWide = max(10.0, min(croppedRect.height * 0.60, minDim * 0.9))
         let estSingleTall = max(10.0, min(croppedRect.width * 0.60, minDim * 0.9))
@@ -107,16 +106,15 @@ enum NoteBlobSplitter {
         maxSplits: Int
     ) -> [CGRect] {
 
-        // Only attempt if it's plausibly wide or at least not extremely tall
+        // Only attempt if plausibly wide
         if croppedRect.width < croppedRect.height * 1.10 { return [croppedRect] }
 
+        // Build row ink to detect beams
         var rowInk = [Int](repeating: 0, count: h)
         for y in 0..<h {
             var s = 0
             for x in 0..<w {
-                let i = (y * w + x) * 4
-                let lum = (Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2])) / 3
-                if lum < threshold { s += 1 }
+                if isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold) { s += 1 }
             }
             rowInk[y] = s
         }
@@ -125,17 +123,16 @@ enum NoteBlobSplitter {
         let rowMax = rowInk.max() ?? 0
         let beamRowMin = Int(Double(rowMax) * 0.80)
 
-        // Widen the band to keep noteheads while still suppressing beams.
+        // band
         let y0 = Int(Double(h) * 0.06)
         let y1 = Int(Double(h) * 0.94)
 
+        // Column projection with beam suppression
         var colInk = [Int](repeating: 0, count: w)
         for y in y0..<y1 {
             if rowInk[y] >= beamRowMin { continue }
             for x in 0..<w {
-                let i = (y * w + x) * 4
-                let lum = (Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2])) / 3
-                if lum < threshold { colInk[x] += 1 }
+                if isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold) { colInk[x] += 1 }
             }
         }
 
@@ -151,8 +148,17 @@ enum NoteBlobSplitter {
         let med = percentile(sm, p: 0.50)
         let peakMin = max(2, Int(max(Double(med) * 1.15, Double(maxVal) * 0.18)))
 
+        // 1) find peaks
         var peaks = findPeaks(sm, peakMin: peakMin, length: w)
-        // Dedupe LESS aggressively to keep close noteheads distinct
+
+        // 2) reject peaks that are "too thin" (usually stem fragments)
+        let minPeakWidth = max(3, Int(Double(w) * 0.06)) // ~6% of crop width, clamped
+        peaks = peaks.filter { peak in
+            let width = peakSupportWidth(arr: sm, center: peak, cutoff: max(1, Int(Double(peakMin) * 0.55)))
+            return width >= minPeakWidth
+        }
+
+        // 3) dedupe a little (but not too much, to preserve close noteheads)
         peaks = dedupePeaks(peaks, minDistance: max(2, Int(Double(w) * 0.045)))
 
         if peaks.count >= 2 {
@@ -166,7 +172,7 @@ enum NoteBlobSplitter {
     private static func splitRectsWide(from peakCols: [Int], in rect: CGRect, cropWidth: Int) -> [CGRect] {
         guard !peakCols.isEmpty else { return [rect] }
 
-        // width per head ~ rect.height * 0.95 (clamped)
+        // width per head ~ rect.height (clamped)
         let estW = max(10.0, min(rect.height * 0.98, rect.width / CGFloat(peakCols.count)))
 
         var out: [CGRect] = []
@@ -189,7 +195,7 @@ enum NoteBlobSplitter {
         return quickNMS(out, iouThreshold: 0.50)
     }
 
-    // MARK: - Tall split (Y)  ✅ fixes triads / stacked heads
+    // MARK: - Tall split (Y)
 
     private static func trySplitTall(
         croppedRect: CGRect,
@@ -200,7 +206,7 @@ enum NoteBlobSplitter {
         maxSplits: Int
     ) -> [CGRect] {
 
-        // Only attempt if it's plausibly tall
+        // Only attempt if plausibly tall
         if croppedRect.height < croppedRect.width * 1.15 { return [croppedRect] }
 
         // Ignore left/right band to reduce stems / barlines influence
@@ -211,9 +217,7 @@ enum NoteBlobSplitter {
         for y in 0..<h {
             var s = 0
             for x in x0..<x1 {
-                let i = (y * w + x) * 4
-                let lum = (Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2])) / 3
-                if lum < threshold { s += 1 }
+                if isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold) { s += 1 }
             }
             rowInk[y] = s
         }
@@ -231,6 +235,14 @@ enum NoteBlobSplitter {
         let peakMin = max(2, Int(max(Double(med) * 1.25, Double(maxVal) * 0.22)))
 
         var peaks = findPeaks(sm, peakMin: peakMin, length: h)
+
+        // Reject peaks that are too thin in Y-support (often from noise / tiny marks)
+        let minPeakHeight = max(3, Int(Double(h) * 0.06))
+        peaks = peaks.filter { peak in
+            let height = peakSupportWidth(arr: sm, center: peak, cutoff: max(1, Int(Double(peakMin) * 0.55)))
+            return height >= minPeakHeight
+        }
+
         peaks = dedupePeaks(peaks, minDistance: max(2, Int(Double(h) * 0.055)))
 
         if peaks.count >= 2 {
@@ -244,7 +256,7 @@ enum NoteBlobSplitter {
     private static func splitRectsTall(from peakRows: [Int], in rect: CGRect, cropHeight: Int) -> [CGRect] {
         guard !peakRows.isEmpty else { return [rect] }
 
-        // height per head ~ rect.width * 0.95 (clamped)
+        // height per head ~ rect.width (clamped)
         let estH = max(10.0, min(rect.width * 1.05, rect.height / CGFloat(peakRows.count)))
 
         var out: [CGRect] = []
@@ -265,6 +277,59 @@ enum NoteBlobSplitter {
         }
 
         return quickNMS(out, iouThreshold: 0.50)
+    }
+
+    // MARK: - Stem / barline veto
+
+    /// Returns true if this crop behaves like a mostly-vertical stroke region.
+    /// This is a *very* common source of "bunched" false notes.
+    private static func isDominantVerticalStroke(pixels: [UInt8], w: Int, h: Int, threshold: Int) -> Bool {
+        guard w >= 6, h >= 10 else { return false }
+
+        // Look at center band columns (stems typically dominate here)
+        let c0 = Int(Double(w) * 0.35)
+        let c1 = Int(Double(w) * 0.65)
+        if c1 <= c0 { return false }
+
+        var maxRun = 0
+        var totalInk = 0
+        var centerInk = 0
+
+        for y in 0..<h {
+            for x in 0..<w {
+                if isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold) {
+                    totalInk += 1
+                    if x >= c0 && x <= c1 { centerInk += 1 }
+                }
+            }
+        }
+        if totalInk == 0 { return false }
+
+        // For each center column, compute max consecutive ink run in Y
+        for x in c0...c1 {
+            var run = 0
+            for y in 0..<h {
+                if isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold) {
+                    run += 1
+                    maxRun = max(maxRun, run)
+                } else {
+                    run = 0
+                }
+            }
+        }
+
+        let centerFrac = Double(centerInk) / Double(totalInk)
+        let runFrac = Double(maxRun) / Double(h)
+
+        // Heuristic:
+        // - A long vertical run through the center,
+        // - AND ink concentrated near the center columns,
+        // strongly implies stem/barline/tail chunk.
+        if runFrac > 0.72 && centerFrac > 0.52 {
+            return true
+        }
+
+        return false
     }
 
     // MARK: - Peak finding
@@ -288,6 +353,18 @@ enum NoteBlobSplitter {
             }
         }
         return peaks
+    }
+
+    /// How wide (in indices) is the peak above cutoff around a center.
+    /// This lets us reject skinny stem peaks.
+    private static func peakSupportWidth(arr: [Int], center: Int, cutoff: Int) -> Int {
+        guard !arr.isEmpty else { return 0 }
+        let n = arr.count
+        var l = center
+        var r = center
+        while l - 1 >= 0 && arr[l - 1] >= cutoff { l -= 1 }
+        while r + 1 < n && arr[r + 1] >= cutoff { r += 1 }
+        return (r - l + 1)
     }
 
     // MARK: - NMS / IoU
@@ -315,6 +392,12 @@ enum NoteBlobSplitter {
 
     // MARK: - Helpers
 
+    private static func isInk(pixels: [UInt8], w: Int, x: Int, y: Int, threshold: Int) -> Bool {
+        let i = (y * w + x) * 4
+        let lum = (Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2])) / 3
+        return lum < threshold
+    }
+
     private static func smooth(_ arr: [Int], radius: Int) -> [Int] {
         guard radius > 0, arr.count > 2 else { return arr }
         var out = arr
@@ -337,9 +420,7 @@ enum NoteBlobSplitter {
         let sorted = peaks.sorted()
         var out: [Int] = []
         for p in sorted {
-            if let last = out.last, abs(p - last) < minDistance {
-                continue
-            }
+            if let last = out.last, abs(p - last) < minDistance { continue }
             out.append(p)
         }
         return out

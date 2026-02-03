@@ -6,18 +6,53 @@ enum ClefKind {
     case bass
 }
 
+/// Why a candidate survived or was rejected (debuggable + extendable)
+enum HeadDecision: String {
+    case kept
+    case rejectedHardStep
+    case rejectedMaxSteps
+    case rejectedEmpty
+}
+
+/// Richer candidate container:
+/// - gateScore = staff-step fit (context)
+/// - shapeScore = notehead-likeness (geometry + ink + vertical-stroke penalty)
+/// - compositeScore = what we rank/suppress on
 struct ScoredHead {
     let rect: CGRect
+
+    // Staff-fit metadata
     var clef: ClefKind?
     var staffStepIndex: Int?
     var staffStepError: CGFloat?
-    var score: CGFloat {
+
+    // Shape metrics (computed in OfflineScoreColorizer where binary/vMask exist)
+    var inkExtent: CGFloat?          // 0..1
+    var strokeOverlap: CGFloat?      // 0..1 (vertical runs)
+    var shapeScore: CGFloat = 0      // 0..1
+
+    // Optional debug state
+    var decision: HeadDecision = .kept
+
+    /// Gate score only (0..1). Closer to a staff step = higher.
+    var gateScore: CGFloat {
         guard let staffStepError else { return 0 }
-        return 1.0 - staffStepError
+        // staffStepError is in "step units" (0 is perfect, 0.5 is halfway)
+        let s = 1.0 - min(1.0, staffStepError / 0.5)
+        return max(0, min(1, s))
+    }
+
+    /// Final ranking score (0..~2.5 depending on weights).
+    /// This is the score we should sort/suppress/consolidate by.
+    var compositeScore: CGFloat {
+        // Keep recall: gate matters, but shape prevents stems/ties from winning.
+        // strokeOverlap is already baked into shapeScore, so don't double-penalize.
+        return (gateScore * 1.55) + (shapeScore * 1.15)
     }
 }
 
 enum StaffStepGate {
+
     struct StepSnap {
         let rawSteps: CGFloat
         let stepIndex: Int
@@ -30,44 +65,73 @@ enum StaffStepGate {
         guard stepSize > 0 else { return nil }
 
         let sortedLines = staffLines.sorted()
-        let refY = sortedLines[4]
+        let refY = sortedLines[4] // bottom line
         let rawSteps = (refY - y) / stepSize
         let stepIndex = Int(rawSteps.rounded())
         let stepError = abs(rawSteps - CGFloat(stepIndex))
         return StepSnap(rawSteps: rawSteps, stepIndex: stepIndex, stepError: stepError)
     }
 
-    static func bestClefAndStep(y: CGFloat,
-                                trebleLines: [CGFloat],
-                                bassLines: [CGFloat],
-                                spacing: CGFloat,
-                                tolerance: CGFloat,
-                                maxSteps: Int) -> (clef: ClefKind, snap: StepSnap)? {
-        let trebleSnap = snapToSteps(y: y, staffLines: trebleLines, spacing: spacing)
-        let bassSnap = snapToSteps(y: y, staffLines: bassLines, spacing: spacing)
+    /// Returns best clef + snap, WITHOUT hard-rejecting by tolerance.
+    static func bestClefAndStepSoft(
+        y: CGFloat,
+        trebleLines: [CGFloat],
+        bassLines: [CGFloat],
+        spacing: CGFloat,
+        maxSteps: Int,
+        preferBassInGap: Bool
+    ) -> (clef: ClefKind, snap: StepSnap)? {
 
-        let best: (ClefKind, StepSnap)?
-        switch (trebleSnap, bassSnap) {
-        case let (t?, b?):
-            best = (t.stepError <= b.stepError) ? (.treble, t) : (.bass, b)
-        case let (t?, nil):
-            best = (.treble, t)
-        case let (nil, b?):
-            best = (.bass, b)
-        case (nil, nil):
-            best = nil
+        let t = snapToSteps(y: y, staffLines: trebleLines, spacing: spacing)
+        let b = snapToSteps(y: y, staffLines: bassLines, spacing: spacing)
+        guard t != nil || b != nil else { return nil }
+
+        let gapBias: CGFloat = preferBassInGap ? 0.03 : 0.0
+
+        var inGap = false
+        if trebleLines.count == 5, bassLines.count == 5 {
+            let trebleSorted = trebleLines.sorted()
+            let bassSorted = bassLines.sorted()
+            let trebleBottom = trebleSorted[4]
+            let bassTop = bassSorted[0]
+            if y > trebleBottom && y < bassTop { inGap = true }
         }
 
-        guard let chosen = best else { return nil }
+        func effectiveError(_ clef: ClefKind, _ snap: StepSnap) -> CGFloat {
+            guard preferBassInGap, inGap else { return snap.stepError }
+            if clef == .bass { return max(0, snap.stepError - gapBias) }
+            return snap.stepError
+        }
+
+        let chosen: (ClefKind, StepSnap)
+        switch (t, b) {
+        case let (tt?, bb?):
+            let te = effectiveError(.treble, tt)
+            let be = effectiveError(.bass, bb)
+            chosen = (te <= be) ? (.treble, tt) : (.bass, bb)
+        case let (tt?, nil):
+            chosen = (.treble, tt)
+        case let (nil, bb?):
+            chosen = (.bass, bb)
+        default:
+            return nil
+        }
+
         guard abs(chosen.1.stepIndex) <= maxSteps else { return nil }
-        guard chosen.1.stepError <= tolerance else { return nil }
         return (clef: chosen.0, snap: chosen.1)
     }
 
-    static func filterCandidates(_ candidates: [ScoredHead],
-                                 system: SystemBlock,
-                                 tolerance: CGFloat = 0.35,
-                                 maxSteps: Int = 18) -> [ScoredHead] {
+    /// Two-tier step gate:
+    /// - hardTolerance: strong reject
+    /// - softTolerance: keep, but low gateScore
+    static func filterCandidates(
+        _ candidates: [ScoredHead],
+        system: SystemBlock,
+        softTolerance: CGFloat = 0.45,
+        hardTolerance: CGFloat = 0.60,
+        maxSteps: Int = 22,
+        preferBassInGap: Bool = true
+    ) -> [ScoredHead] {
         guard !candidates.isEmpty else { return [] }
 
         var out: [ScoredHead] = []
@@ -75,18 +139,32 @@ enum StaffStepGate {
 
         for var candidate in candidates {
             let centerY = candidate.rect.midY
-            guard let match = bestClefAndStep(
+
+            guard let match = bestClefAndStepSoft(
                 y: centerY,
                 trebleLines: system.trebleLines,
                 bassLines: system.bassLines,
                 spacing: system.spacing,
-                tolerance: tolerance,
-                maxSteps: maxSteps
+                maxSteps: maxSteps,
+                preferBassInGap: preferBassInGap
             ) else { continue }
+
+            if abs(match.snap.stepIndex) > maxSteps {
+                candidate.decision = .rejectedMaxSteps
+                continue
+            }
+
+            if match.snap.stepError > hardTolerance {
+                candidate.decision = .rejectedHardStep
+                continue
+            }
 
             candidate.clef = match.clef
             candidate.staffStepIndex = match.snap.stepIndex
             candidate.staffStepError = match.snap.stepError
+
+            // still keep above softTolerance (high recall); it just ranks lower later
+            _ = softTolerance // kept for readability; gateScore handles this
             out.append(candidate)
         }
 
