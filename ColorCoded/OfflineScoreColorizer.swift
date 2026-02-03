@@ -21,6 +21,7 @@ private struct DebugMaskData {
 private var debugMaskData: DebugMaskData?
 
 enum OfflineScoreColorizer {
+
     private enum RejectTuning {
         static let ledgerRunFrac: Double = 0.70
         static let ledgerFillMax: Double = 0.12
@@ -72,36 +73,28 @@ enum OfflineScoreColorizer {
                         let staffModel = await StaffDetector.detectStaff(in: image)
                         let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
 
-                        let baseImage = image
-                        let cleanedImage = await buildStrokeCleanedImage(
-                            baseImage: baseImage,
-                            staffModel: staffModel,
-                            systems: systems
-                        )
+                        // Build stroke-cleaned image AND keep the cleaned binary.
+                        let cleaned = await buildStrokeCleaned(baseImage: image,
+                                                              staffModel: staffModel,
+                                                              systems: systems)
+
+                        let cleanedImage = cleaned?.image
+                        let cleanedBinary = cleaned?.binaryPage
 
                         // High recall note candidates
-                        let detection = await NoteheadDetector.detectDebug(in: cleanedImage ?? baseImage)
+                        let detection = await NoteheadDetector.detectDebug(in: cleanedImage ?? image)
 
                         // Barlines
                         let barlines = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
 
+                        // IMPORTANT: use cleanedBinary directly.
                         let filtered = filterNoteheadsHighRecall(
                             detection.noteRects,
                             systems: systems,
                             barlines: barlines,
                             fallbackSpacing: staffModel?.lineSpacing ?? 12.0,
                             cgImage: image.cgImageSafe,
-                            binaryOverride: {
-                                if let cleaned = cleanedImage, let cg = cleaned.cgImageSafe {
-                                    let (bin, w, h) = buildBinaryInkMap(from: cg, lumThreshold: 175)
-                                    return (bin, w, h)
-                                } else if let cg = image.cgImageSafe {
-                                    let (bin, w, h) = buildBinaryInkMap(from: cg, lumThreshold: 175)
-                                    return (bin, w, h)
-                                } else {
-                                    return nil
-                                }
-                            }()
+                            binaryOverride: cleanedBinary
                         )
 
                         let colored = drawOverlays(
@@ -171,15 +164,22 @@ enum OfflineScoreColorizer {
 
     // MARK: - Stroke erasing (pre-contour cleanup)
 
-    private static func buildStrokeCleanedImage(baseImage: PlatformImage,
-                                                staffModel: StaffModel?,
-                                                systems: [SystemBlock]) async -> PlatformImage? {
+    private struct CleanedStrokeResult {
+        let image: PlatformImage
+        let binaryPage: ([UInt8], Int, Int)
+    }
+
+    private static func buildStrokeCleaned(baseImage: PlatformImage,
+                                           staffModel: StaffModel?,
+                                           systems: [SystemBlock]) async -> CleanedStrokeResult? {
         guard let cg = baseImage.cgImageSafe, !systems.isEmpty else { return nil }
+
         let spacing = max(6.0, staffModel?.lineSpacing ?? 12.0)
 
+        // Raw candidates (high recall)
         let rawCandidates = await NoteheadDetector.detectNoteheads(in: baseImage)
 
-        return buildStrokeCleanedImage(
+        return buildStrokeCleaned(
             cgImage: cg,
             spacing: spacing,
             systems: systems,
@@ -187,34 +187,58 @@ enum OfflineScoreColorizer {
         )
     }
 
-    private static func buildStrokeCleanedImage(cgImage: CGImage,
-                                                spacing: CGFloat,
-                                                systems: [SystemBlock],
-                                                protectRects: [CGRect]) -> PlatformImage? {
+    private static func buildStrokeCleaned(cgImage: CGImage,
+                                           spacing: CGFloat,
+                                           systems: [SystemBlock],
+                                           protectRects: [CGRect]) -> CleanedStrokeResult? {
+
         let (bin, w, h) = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         var binary = bin
 
-        var protectMask = [UInt8](repeating: 0, count: w * h)
+        // Build ONE global vertical-stroke mask to avoid protecting stem neighborhoods.
         let u = max(7.0, spacing)
+        let globalStrokeMask: VerticalStrokeMask? = VerticalStrokeMask.build(
+            from: binary,
+            width: w,
+            height: h,
+            roi: CGRect(x: 0, y: 0, width: w, height: h),
+            minRun: max(12, Int((2.0 * u).rounded()))
+        )
+
+        // Protect mask (tight!)
+        var protectMask = [UInt8](repeating: 0, count: w * h)
         let minDim = 0.35 * u
         let maxDim = 1.8 * u
 
         for rect in protectRects {
-            guard rect.width >= minDim, rect.height >= minDim else { continue }
-            guard rect.width <= maxDim, rect.height <= maxDim else { continue }
-            let maskMinRun = max(6, Int((spacing * 1.6).rounded()))
-            if let pageMask = VerticalStrokeMask.build(from: binary,
-                                                       width: w,
-                                                       height: h,
-                                                       roi: rect.insetBy(dx: -u, dy: -u),
-                                                       minRun: maskMinRun) {
-                let overlapRect = rect.insetBy(dx: -0.30 * u, dy: -0.15 * u)
-                if pageMask.overlapRatio(with: overlapRect) > 0.14 { continue }
+            let rw = rect.width
+            let rh = rect.height
+            guard rw >= minDim, rh >= minDim else { continue }
+            guard rw <= maxDim, rh <= maxDim else { continue }
+
+            // Reject skinny strokes early
+            let aspect = max(rw / max(1, rh), rh / max(1, rw))
+            if aspect > 2.2 { continue }
+
+            // Reject ultra tiny specks
+            if rw < 0.25 * u && rh < 0.25 * u { continue }
+
+            // Require some fill (tails often low fill)
+            let fill = rectInkExtent(rect, bin: binary, pageW: w, pageH: h)
+            if fill < 0.10 { continue }
+
+            // Don’t protect if near obvious vertical stroke areas
+            if let gsm = globalStrokeMask {
+                let neighborhood = rect.insetBy(dx: -1.0 * u, dy: -0.8 * u)
+                if gsm.overlapRatio(with: neighborhood) > 0.12 { continue }
             }
+
             let expanded = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u)
             markMask(&protectMask, rect: expanded, width: w, height: h)
         }
 
+        // Erase strokes per system
+        var lastStrokeMask: [UInt8]?
         for system in systems {
             let result = VerticalStrokeEraser.eraseStrokes(
                 binary: binary,
@@ -224,22 +248,28 @@ enum OfflineScoreColorizer {
                 spacing: spacing,
                 protectMask: protectMask
             )
+
             if debugStrokeErase {
-                debugMaskData = DebugMaskData(
-                    strokeMask: result.strokeMask,
-                    protectMask: protectMask,
-                    width: w,
-                    height: h
-                )
+                lastStrokeMask = result.strokeMask
                 print("StrokeErase system erased=\(result.erasedCount) strokeTotal=\(result.totalStrokeCount)")
             }
+
             binary = result.binaryWithoutStrokes
         }
 
-        binary = BinaryNoiseCleaner.clean(binary: binary, width: w, height: h, spacing: spacing)
+        if debugStrokeErase, let sm = lastStrokeMask {
+            debugMaskData = DebugMaskData(
+                strokeMask: sm,
+                protectMask: protectMask,
+                width: w,
+                height: h
+            )
+        }
 
-        guard let cleanedCG = buildBinaryCGImage(from: binary, width: w, height: h) else { return nil }
-        return makePlatformImage(from: cleanedCG)
+        guard let cleanedCG = buildBinaryCGImage(from: binary, width: w, height: h),
+              let cleanedImg = makePlatformImage(from: cleanedCG) else { return nil }
+
+        return CleanedStrokeResult(image: cleanedImg, binaryPage: (binary, w, h))
     }
 
     private static func markMask(_ mask: inout [UInt8], rect: CGRect, width: Int, height: Int) {
@@ -296,6 +326,31 @@ enum OfflineScoreColorizer {
         return nil
         #endif
     }
+
+    // ------------------------------------------------------------------
+    // Everything BELOW here: keep your existing functions exactly as-is.
+    // You already pasted them and they compile. No changes required there:
+    //
+    // - filterNoteheadsHighRecall(...)
+    // - shouldRejectAsStemOrLine(...)
+    // - computePatchMetrics(...)
+    // - minDistanceToAnyStaffLine(...)
+    // - consolidateByStepAndX(...)
+    // - drawOverlays(...)
+    // - buildMaskOverlayImage(...)
+    // - buildBinaryInkMap(...)
+    // - rectInkExtent(...)
+    // - isStemLikeByColumnDominance(...)
+    // - lineLikenessPCA(...)
+    // - meanStrokeThickness(...)
+    // ------------------------------------------------------------------
+
+    // ✅ KEEP: filterNoteheadsHighRecall, shouldRejectAsStemOrLine, etc.
+    // (paste your existing implementations below this point unchanged)
+
+    // MARK: - Filtering (high recall, targeted noise suppression)
+    // ... (paste your existing code unchanged below)
+
 
     // MARK: - Filtering (high recall, targeted noise suppression)
 

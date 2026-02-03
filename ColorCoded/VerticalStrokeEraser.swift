@@ -1,8 +1,8 @@
 import Foundation
 import CoreGraphics
 
-/// Detect + erase thin vertical strokes (stems/tails/barline fragments) from a binary ink map.
-/// binary: 1 = ink, 0 = white
+/// Detect + erase thin stroke-like ink (stems/tails/slurs/ties fragments) from a binary ink map.
+/// - binary: 1 = ink, 0 = white
 enum VerticalStrokeEraser {
 
     struct Result {
@@ -12,13 +12,6 @@ enum VerticalStrokeEraser {
         let totalStrokeCount: Int        // total stroke pixels (including protected zones)
     }
 
-    /// Main entry point.
-    /// - Parameters:
-    ///   - binary: full page binary (w*h)
-    ///   - width/height: page dims
-    ///   - systemRect: ROI in *pixel coords* (same coord space as binary)
-    ///   - spacing: staff spacing in pixels (approx)
-    ///   - protectMask: full page mask (1=protected, 0=erasable)
     static func eraseStrokes(binary: [UInt8],
                              width: Int,
                              height: Int,
@@ -29,28 +22,25 @@ enum VerticalStrokeEraser {
         guard binary.count == width * height,
               protectMask.count == width * height else {
             return Result(binaryWithoutStrokes: binary,
-                          strokeMask: [UInt8](repeating: 0, count: width * height),
+                          strokeMask: [UInt8](repeating: 0, count: max(0, width * height)),
                           erasedCount: 0,
                           totalStrokeCount: 0)
         }
 
-        // --- Tunables (these matter) ---
         let u = max(6.0, spacing)
 
-        // Minimum height of vertical run to count as a "stroke"
-        // (stems are typically multiple spacings tall)
-        let minRun = max(10, Int((2.4 * u).rounded()))
+        // --- Tunables ---
+        let minRun = max(10, Int((2.2 * u).rounded()))
+        let maxGap = max(1, Int((0.12 * u).rounded()))
+        let maxWidth = max(2, Int((0.15 * u).rounded()))
+        let dilateR = max(1, Int((0.06 * u).rounded()))
 
-        // Allow small gaps because anti-aliasing often breaks runs
-        let maxGap = max(1, Int((0.10 * u).rounded()))   // typically 1–2 px
+        // Extra pass: diagonal/curved thin components (tails/slurs)
+        let thinWidth = max(2, Int((0.12 * u).rounded()))
+        let compLongSideMin = max(10, Int((1.15 * u).rounded()))
+        let compShortSideMax = max(3, Int((0.28 * u).rounded()))
+        let compMinPixels = max(18, Int((0.45 * u).rounded()))
 
-        // Must be "thin": average width across run <= maxWidth
-        let maxWidth = max(2, Int((0.14 * u).rounded())) // typically 2–3 px
-
-        // Dilate stroke mask so edges don't survive as micro-contours
-        let dilateR = max(1, Int((0.06 * u).rounded()))  // typically 1–2 px
-
-        // Clip ROI
         let roi = systemRect.intersection(CGRect(x: 0, y: 0, width: width, height: height))
         if roi.width < 2 || roi.height < 2 {
             return Result(binaryWithoutStrokes: binary,
@@ -64,25 +54,31 @@ enum VerticalStrokeEraser {
         let x1 = min(width - 1, Int(ceil(roi.maxX)))
         let y1 = min(height - 1, Int(ceil(roi.maxY)))
 
-        // --- Build stroke mask ---
         var strokeMask = [UInt8](repeating: 0, count: width * height)
 
-        // Helper to read ink
-        @inline(__always) func ink(_ x: Int, _ y: Int) -> Bool {
-            binary[y * width + x] != 0
-        }
+        @inline(__always) func idx(_ x: Int, _ y: Int) -> Int { y * width + x }
+        @inline(__always) func ink(_ x: Int, _ y: Int) -> Bool { binary[idx(x, y)] != 0 }
 
-        // Estimate local "thickness" at a pixel by checking a small horizontal neighborhood
-        // Returns 1..3ish (for stems), bigger for noteheads/beams
         @inline(__always) func localWidthAt(_ x: Int, _ y: Int) -> Int {
-            var w = 0
-            if x > 0 && ink(x - 1, y) { w += 1 }
-            if ink(x, y) { w += 1 }
-            if x + 1 < width && ink(x + 1, y) { w += 1 }
-            return w
+            if thinWidth <= 2 {
+                var w = 0
+                if x > 0 && ink(x - 1, y) { w += 1 }
+                if ink(x, y) { w += 1 }
+                if x + 1 < width && ink(x + 1, y) { w += 1 }
+                return w
+            } else {
+                let r = min(2, thinWidth)
+                var w = 0
+                for xx in max(0, x - r)...min(width - 1, x + r) {
+                    if ink(xx, y) { w += 1 }
+                }
+                return w
+            }
         }
 
-        // Scan each column in ROI to find long vertical runs, with gap-bridging.
+        // ------------------------------------------------------------
+        // PASS 1: long thin vertical runs
+        // ------------------------------------------------------------
         for x in x0...x1 {
             var runStart: Int? = nil
             var runInkCount = 0
@@ -96,10 +92,9 @@ enum VerticalStrokeEraser {
                 if runLen >= minRun && runInkCount > 0 {
                     let avgW = Double(runWidthSum) / Double(runInkCount)
                     if avgW <= Double(maxWidth) {
-                        // Mark as stroke
                         for yy in ys..<ye {
-                            if ink(x, yy) { // only mark actual ink pixels
-                                strokeMask[yy * width + x] = 1
+                            if yy >= y0 && yy <= y1, ink(x, yy) {
+                                strokeMask[idx(x, yy)] = 1
                             }
                         }
                     }
@@ -117,26 +112,104 @@ enum VerticalStrokeEraser {
                     runWidthSum += localWidthAt(x, y)
                     gapCount = 0
                 } else if runStart != nil {
-                    // white pixel inside a run: allow small gaps
                     gapCount += 1
                     if gapCount > maxGap {
                         flushRun(at: y - gapCount + 1)
                     }
                 }
             }
-            // Flush at end
+
             if runStart != nil {
                 flushRun(at: y1 + 1)
             }
         }
 
-        // Dilate stroke mask inside ROI (simple square dilation)
+        // ------------------------------------------------------------
+        // PASS 2: thin diagonal/curved components (tails/slurs/ties)
+        // ------------------------------------------------------------
+        let roiW = x1 - x0 + 1
+        let roiH = y1 - y0 + 1
+        var thin = [UInt8](repeating: 0, count: roiW * roiH)
+        var visited = [UInt8](repeating: 0, count: roiW * roiH)
+
+        @inline(__always) func ridx(_ x: Int, _ y: Int) -> Int { (y - y0) * roiW + (x - x0) }
+
+        for y in y0...y1 {
+            for x in x0...x1 {
+                if ink(x, y) && localWidthAt(x, y) <= thinWidth {
+                    thin[ridx(x, y)] = 1
+                }
+            }
+        }
+
+        let neighbor8 = [(-1,-1),(0,-1),(1,-1),
+                         (-1, 0),       (1, 0),
+                         (-1, 1),(0, 1),(1, 1)]
+
+        var stackX: [Int] = []
+        var stackY: [Int] = []
+        stackX.reserveCapacity(2048)
+        stackY.reserveCapacity(2048)
+
+        for y in y0...y1 {
+            for x in x0...x1 {
+                let ri = ridx(x, y)
+                if thin[ri] == 0 || visited[ri] != 0 { continue }
+
+                visited[ri] = 1
+                stackX.removeAll(keepingCapacity: true)
+                stackY.removeAll(keepingCapacity: true)
+                stackX.append(x)
+                stackY.append(y)
+
+                var minX = x, maxX = x, minY = y, maxY = y
+                var pixels = 0
+
+                while let cx = stackX.popLast(), let cy = stackY.popLast() {
+                    pixels += 1
+                    minX = min(minX, cx); maxX = max(maxX, cx)
+                    minY = min(minY, cy); maxY = max(maxY, cy)
+
+                    for (dx, dy) in neighbor8 {
+                        let nx = cx + dx
+                        let ny = cy + dy
+                        if nx < x0 || nx > x1 || ny < y0 || ny > y1 { continue }
+                        let ni = ridx(nx, ny)
+                        if thin[ni] != 0 && visited[ni] == 0 {
+                            visited[ni] = 1
+                            stackX.append(nx)
+                            stackY.append(ny)
+                        }
+                    }
+                }
+
+                if pixels < compMinPixels { continue }
+
+                let bboxW = maxX - minX + 1
+                let bboxH = maxY - minY + 1
+                let longSide = max(bboxW, bboxH)
+                let shortSide = min(bboxW, bboxH)
+
+                if longSide >= compLongSideMin && shortSide <= compShortSideMax {
+                    for yy in minY...maxY {
+                        for xx in minX...maxX {
+                            if ink(xx, yy) {
+                                strokeMask[idx(xx, yy)] = 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ------------------------------------------------------------
+        // Dilate stroke mask (inside ROI)
+        // ------------------------------------------------------------
         if dilateR > 0 {
             var dilated = strokeMask
             for y in y0...y1 {
                 for x in x0...x1 {
-                    let idx = y * width + x
-                    if strokeMask[idx] == 0 { continue }
+                    if strokeMask[idx(x, y)] == 0 { continue }
                     let xx0 = max(x0, x - dilateR)
                     let xx1 = min(x1, x + dilateR)
                     let yy0 = max(y0, y - dilateR)
@@ -152,7 +225,9 @@ enum VerticalStrokeEraser {
             strokeMask = dilated
         }
 
-        // --- Apply erasing (but do not erase protected pixels) ---
+        // ------------------------------------------------------------
+        // Apply erase (respect protectMask)
+        // ------------------------------------------------------------
         var out = binary
         var erased = 0
         var strokeTotal = 0
@@ -160,11 +235,11 @@ enum VerticalStrokeEraser {
         for y in y0...y1 {
             let row = y * width
             for x in x0...x1 {
-                let idx = row + x
-                if strokeMask[idx] != 0 {
+                let i = row + x
+                if strokeMask[i] != 0 {
                     strokeTotal += 1
-                    if protectMask[idx] == 0 && out[idx] != 0 {
-                        out[idx] = 0
+                    if protectMask[i] == 0 && out[i] != 0 {
+                        out[i] = 0
                         erased += 1
                     }
                 }
