@@ -401,9 +401,10 @@ enum OfflineScoreColorizer {
             let spacing = max(6.0, system.spacing)
 
             // barline Xs within system (used for penalties + barline veto)
-            let barlineXs = barlines
-                .filter { $0.maxY >= system.bbox.minY && $0.minY <= system.bbox.maxY }
-                .map { $0.midX }
+            let barlinesInSystem = barlines.filter {
+                $0.maxY >= system.bbox.minY && $0.minY <= system.bbox.maxY
+            }
+            let barlineXs = barlinesInSystem.map { $0.midX }
 
             // Symbol zone (clef/key/time region)
             let symbolZone: CGRect = {
@@ -456,8 +457,21 @@ enum OfflineScoreColorizer {
                 !symbolZone.contains(CGPoint(x: r.midX, y: r.midY))
             }
 
+            // Aggressive tail cutoff: drop anything in the trailing margin.
+            // This intentionally sacrifices notes to prevent right-edge artifacts.
+            let tailCutoffX: CGFloat = {
+                if let rightmostBarline = barlinesInSystem.max(by: { $0.maxX < $1.maxX }) {
+                    return min(system.bbox.maxX, rightmostBarline.maxX + spacing * 0.8)
+                }
+                return system.bbox.maxX - spacing * 0.6
+            }()
+
+            let noTail = noSymbols.filter { r in
+                r.midX <= tailCutoffX
+            }
+
             // Staff-step gate
-            let scored0 = noSymbols.map { ScoredHead(rect: $0) }
+            let scored0 = noTail.map { ScoredHead(rect: $0) }
             let gated0 = StaffStepGate.filterCandidates(scored0, system: system)
 
             // ✅ NEW: compute shapeScore BEFORE clustering/suppression so junk loses
