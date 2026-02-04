@@ -74,6 +74,9 @@ enum OfflineScoreColorizer {
                     Task {
                         let staffModel = await StaffDetector.detectStaff(in: image)
                         let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
+                        if debugFiltering {
+                            print("[pipe] page=\(pageIndex) staffSpacing=\(staffModel?.lineSpacing ?? -1) systems=\(systems.count)")
+                        }
 
                         // Build stroke-cleaned image AND keep the cleaned binary.
                         let cleaned = await buildStrokeCleaned(baseImage: image,
@@ -82,6 +85,9 @@ enum OfflineScoreColorizer {
 
                         let cleanedImage = cleaned?.image
                         let cleanedBinary = cleaned?.binaryPage
+                        if debugFiltering {
+                            print("[pipe] strokeCleaned=\(cleaned != nil) binaryOverride=\(cleanedBinary != nil)")
+                        }
 
                         // High recall note candidates
                         let detection = await NoteheadDetector.detectDebug(in: cleanedImage ?? image)
@@ -394,11 +400,30 @@ enum OfflineScoreColorizer {
             return DuplicateSuppressor.suppress(noteheads, spacing: fallbackSpacing)
         }
 
+        // If systems not found, only do dedupe (avoid losing notes)
         // Build binary page once (reused across systems)
         let binaryPage: ([UInt8], Int, Int)? = binaryOverride ?? {
             guard let cgImage else { return nil }
             return buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         }()
+
+        // If systems not found, apply a light global safety net + dedupe (avoid losing notes)
+        guard !systems.isEmpty else {
+            if debugFiltering {
+                print("[filter] systems=0 (global safety net only)")
+            }
+            let globallyFiltered = filterNoteheadsGlobalSafetyNet(
+                noteheads,
+                spacing: fallbackSpacing,
+                binaryPage: binaryPage,
+                systems: []
+            )
+            let deduped = DuplicateSuppressor.suppress(globallyFiltered, spacing: fallbackSpacing)
+            if debugFiltering {
+                print("[filter] out=\(deduped.count)")
+            }
+            return deduped
+        }
 
         var out: [CGRect] = []
         var consumed = Set<Int>()
