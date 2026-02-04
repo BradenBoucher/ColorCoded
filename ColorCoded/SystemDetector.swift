@@ -106,9 +106,23 @@ enum SystemDetector {
 
         // If somehow we built nothing, fall back to per-staff blocks
         if systems.isEmpty {
-            for s in staves {
-                if let sys = buildSystem(treble: s, bass: [], spacing: spacing, imageSize: imageSize, isFallback: true) {
-                    systems.append(sys)
+            let allLines = sortedStaves.flatMap { $0 }.sorted()
+            if let topLine = allLines.first, let bottomLine = allLines.last {
+                let top = topLine - spacing * 3.0
+                let bottom = bottomLine + spacing * 3.0
+
+                let y0 = max(0, top)
+                let y1 = min(imageSize.height, bottom)
+                let h = max(1, y1 - y0)
+                if h > 1 {
+                    let bbox = CGRect(x: 0, y: y0, width: imageSize.width, height: h)
+                    let trebleLines = sortedStaves.first?.sorted() ?? []
+                    let bassLines = sortedStaves.dropFirst().first?.sorted() ?? []
+                    systems.append(SystemBlock(trebleLines: trebleLines,
+                                               bassLines: bassLines,
+                                               spacing: spacing,
+                                               bbox: bbox,
+                                               isFallback: true))
                 }
             }
         }

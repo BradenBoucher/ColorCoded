@@ -264,7 +264,7 @@ enum OfflineScoreColorizer {
                 if gsm.overlapRatio(with: neighborhood) > 0.25 { continue }
             }
 
-            let core = rect.insetBy(dx: -0.45 * u, dy: -0.45 * u)
+            let core = rect.insetBy(dx: -0.35 * u, dy: -0.35 * u)
             markMask(&protectMask, rect: core, width: w, height: h)
         }
 
@@ -292,7 +292,7 @@ enum OfflineScoreColorizer {
             let u = max(7.0, spacing)
             let sampleStride = max(1, protectRects.count / 30)
             for (idx, rect) in protectRects.enumerated() where idx % sampleStride == 0 {
-                let core = rect.insetBy(dx: -0.45 * u, dy: -0.45 * u)
+                let core = rect.insetBy(dx: -0.35 * u, dy: -0.35 * u)
                 let fillBefore = rectInkExtent(core, bin: bin, pageW: w, pageH: h)
                 let fillAfter = rectInkExtent(core, bin: binary, pageW: w, pageH: h)
                 if fillBefore > 0.05 && fillAfter < 0.6 * fillBefore {
