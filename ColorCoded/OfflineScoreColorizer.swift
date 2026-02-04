@@ -12,6 +12,7 @@ import AppKit
 private let debugStrokeErase = true
 private let debugFiltering = true
 private let debugDrawSystems = true
+private let debugDrawMasks = false
 
 private struct DebugMaskData {
     let strokeMask: [UInt8]
@@ -263,7 +264,7 @@ enum OfflineScoreColorizer {
                 if gsm.overlapRatio(with: neighborhood) > 0.12 { continue }
             }
 
-            let core = rect.insetBy(dx: -0.10 * u, dy: -0.10 * u)
+            let core = rect.insetBy(dx: -0.35 * u, dy: -0.35 * u)
             markMask(&protectMask, rect: core, width: w, height: h)
         }
 
@@ -291,7 +292,7 @@ enum OfflineScoreColorizer {
             let u = max(7.0, spacing)
             let sampleStride = max(1, protectRects.count / 30)
             for (idx, rect) in protectRects.enumerated() where idx % sampleStride == 0 {
-                let core = rect.insetBy(dx: -0.10 * u, dy: -0.10 * u)
+                let core = rect.insetBy(dx: -0.35 * u, dy: -0.35 * u)
                 let fillBefore = rectInkExtent(core, bin: bin, pageW: w, pageH: h)
                 let fillAfter = rectInkExtent(core, bin: binary, pageW: w, pageH: h)
                 if fillBefore > 0.05 && fillAfter < 0.6 * fillBefore {
@@ -443,6 +444,7 @@ enum OfflineScoreColorizer {
 
         for (systemIndex, system) in systems.enumerated() {
             let spacing = max(6.0, system.spacing)
+            let isFallback = system.isFallback
 
             // barline Xs within system (used for penalties + barline veto)
             let barlinesInSystem = barlines.filter {
@@ -497,7 +499,7 @@ enum OfflineScoreColorizer {
             }
 
             // Remove symbol zone only (safe)
-            let noSymbols = systemRects.filter { r in
+            let noSymbols = isFallback ? systemRects : systemRects.filter { r in
                 !symbolZone.contains(CGPoint(x: r.midX, y: r.midY))
             }
 
@@ -510,7 +512,7 @@ enum OfflineScoreColorizer {
                 return system.bbox.maxX - spacing * 0.6
             }()
 
-            let noTail = noSymbols.filter { r in
+            let noTail = isFallback ? noSymbols : noSymbols.filter { r in
                 r.midX <= tailCutoffX
             }
 
@@ -1145,7 +1147,7 @@ enum OfflineScoreColorizer {
             ctx.cgContext.addLine(to: CGPoint(x: 4, y: 4 + markerSize))
             ctx.cgContext.strokePath()
 
-            if debugStrokeErase, let maskData = debugMaskData,
+            if debugDrawMasks, let maskData = debugMaskData,
                let overlay = buildMaskOverlayImage(maskData: maskData, size: image.size) {
                 ctx.cgContext.setAlpha(0.25)
                 ctx.cgContext.draw(overlay, in: CGRect(origin: .zero, size: image.size))

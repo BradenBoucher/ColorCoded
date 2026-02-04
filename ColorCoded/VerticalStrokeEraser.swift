@@ -280,7 +280,8 @@ enum VerticalStrokeEraser {
                 let i = row + x
                 if strokeMask[i] != 0 {
                     strokeTotal += 1
-                    if protectMask[i] == 0 && out[i] != 0 {
+                    if protectMask[i] != 0 { continue }
+                    if out[i] != 0 {
                         out[i] = 0
                         erased += 1
                     }
