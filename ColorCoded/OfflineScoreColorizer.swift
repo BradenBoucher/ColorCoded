@@ -540,8 +540,8 @@ enum OfflineScoreColorizer {
                 binaryPage: binaryPage
             )
 
-            // Aggressive run-kill: drop runs of 5+ tightly packed markers.
-            let noDenseRuns = removeDenseRuns(consolidated, spacing: spacing)
+            // Aggressive run-kill: drop runs of 3+ tightly packed markers (unconditional).
+            let noDenseRuns = removeDenseRuns(consolidated, spacing: spacing, minRun: 3)
 
             // Final light dedupe
             let deduped = DuplicateSuppressor.suppress(noDenseRuns, spacing: spacing)
@@ -877,11 +877,10 @@ enum OfflineScoreColorizer {
 
     private static func removeDenseRuns(_ rects: [CGRect],
                                         spacing: CGFloat,
-                                        minRun: Int = 5) -> [CGRect] {
+                                        minRun: Int = 3) -> [CGRect] {
         guard rects.count >= minRun else { return rects }
 
-        let maxGap = max(1.0, spacing * 0.35)
-        let maxYSpread = spacing * 0.55
+        let maxGap = max(1.0, spacing * 0.45)
         let sorted = rects.sorted { $0.midX < $1.midX }
         var drop = Set<Int>()
 
@@ -895,12 +894,7 @@ enum OfflineScoreColorizer {
                 let runEnd = i - 1
                 let runCount = runEnd - runStart + 1
                 if runCount >= minRun {
-                    let runSlice = sorted[runStart...runEnd]
-                    let minY = runSlice.map(\.midY).min() ?? 0
-                    let maxY = runSlice.map(\.midY).max() ?? 0
-                    if (maxY - minY) <= maxYSpread {
-                        for idx in runStart...runEnd { drop.insert(idx) }
-                    }
+                    for idx in runStart...runEnd { drop.insert(idx) }
                 }
                 runStart = i
             }
