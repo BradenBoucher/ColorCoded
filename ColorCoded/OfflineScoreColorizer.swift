@@ -230,8 +230,8 @@ enum OfflineScoreColorizer {
 
         // Protect mask (tight!)
         var protectMask = [UInt8](repeating: 0, count: w * h)
-        let minDim = 0.35 * u
-        let maxDim = 1.8 * u
+        let minDim = 0.30 * u
+        let maxDim = 2.0 * u
 
         for rect in protectRects {
             let rw = rect.width
@@ -241,27 +241,27 @@ enum OfflineScoreColorizer {
 
             // Reject skinny strokes early
             let aspect = max(rw / max(1, rh), rh / max(1, rw))
-            if aspect > 2.2 { continue }
+            if aspect > 3.0 { continue }
 
             // Reject ultra tiny specks
             if rw < 0.25 * u && rh < 0.25 * u { continue }
 
             // Require some fill (tails often low fill)
             let fill = rectInkExtent(rect, bin: binary, pageW: w, pageH: h)
-            if fill < 0.10 { continue }
+            if fill < 0.06 { continue }
 
-            let expanded = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u)
+            let expanded = rect.insetBy(dx: -0.30 * u, dy: -0.30 * u)
             let expandedFill = rectInkExtent(expanded, bin: binary, pageW: w, pageH: h)
             let expandedPCA = lineLikenessPCA(expanded, bin: binary, pageW: w, pageH: h)
-            let isBlobLike = expandedFill >= 0.22 &&
-                expandedPCA.eccentricity <= 4.8 &&
-                min(rw, rh) >= 0.28 * u
+            let isBlobLike = expandedFill >= 0.18 &&
+                expandedPCA.eccentricity <= 6.0 &&
+                min(rw, rh) >= 0.24 * u
             if !isBlobLike { continue }
 
             // Don’t protect if near obvious vertical stroke areas
             if let gsm = globalStrokeMask {
                 let neighborhood = rect.insetBy(dx: -1.0 * u, dy: -0.8 * u)
-                if gsm.overlapRatio(with: neighborhood) > 0.12 { continue }
+                if gsm.overlapRatio(with: neighborhood) > 0.25 { continue }
             }
 
             let core = rect.insetBy(dx: -0.35 * u, dy: -0.35 * u)
