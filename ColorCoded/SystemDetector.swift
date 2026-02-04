@@ -7,6 +7,18 @@ struct SystemBlock {
     let spacing: CGFloat
     let bbox: CGRect
     let isFallback: Bool
+
+    init(trebleLines: [CGFloat],
+         bassLines: [CGFloat],
+         spacing: CGFloat,
+         bbox: CGRect,
+         isFallback: Bool = false) {
+        self.trebleLines = trebleLines
+        self.bassLines = bassLines
+        self.spacing = spacing
+        self.bbox = bbox
+        self.isFallback = isFallback
+    }
 }
 
 enum SystemDetector {
@@ -67,13 +79,28 @@ enum SystemDetector {
         }
 
         if systems.isEmpty {
-            for staffLines in sortedStaves {
-                guard let system = buildSystem(treble: staffLines.sorted(),
-                                               bass: [],
+            let allLines = sortedStaves.flatMap { $0 }.sorted()
+            if let topLine = allLines.first, let bottomLine = allLines.last {
+                let top = topLine - spacing * 3.0
+                let bottom = bottomLine + spacing * 3.0
+
+                var y0 = max(0, top)
+                var y1 = min(imageSize.height, bottom)
+                if (y1 - y0) < imageSize.height * 0.55 {
+                    y0 = 0
+                    y1 = imageSize.height
+                }
+                let h = max(1, y1 - y0)
+                if h > 1 {
+                    let bbox = CGRect(x: 0, y: y0, width: imageSize.width, height: h)
+                    let trebleLines = sortedStaves.first?.sorted() ?? []
+                    let bassLines = sortedStaves.dropFirst().first?.sorted() ?? []
+                    systems.append(SystemBlock(trebleLines: trebleLines,
+                                               bassLines: bassLines,
                                                spacing: spacing,
-                                               imageSize: imageSize,
-                                               isFallback: true) else { continue }
-                systems.append(system)
+                                               bbox: bbox,
+                                               isFallback: true))
+                }
             }
         }
 
