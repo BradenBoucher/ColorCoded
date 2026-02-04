@@ -25,6 +25,28 @@ private struct DebugMaskData {
 private var debugMaskData: DebugMaskData?
 
 enum OfflineScoreColorizer {
+    private struct StrokeCleanResult {
+        let image: PlatformImage
+        let binary: [UInt8]
+        let width: Int
+        let height: Int
+        let strokeMask: [UInt8]
+        let protectMask: [UInt8]
+    }
+    private enum RejectTuning {
+        static let ledgerRunFrac: Double = 0.70
+        static let ledgerFillMax: Double = 0.12
+        static let tailFillMax: Double = 0.10
+        static let tailAsymMin: Double = 0.55
+        static let axisRatioMin: Double = 3.2
+        static let overlapExpandedMin: Double = 0.22
+    }
+
+    private struct PatchMetrics {
+        let fillRatio: Double
+        let centerRowMaxRunFrac: Double
+        let lrAsymmetry: Double
+    }
 
     private enum RejectTuning {
         static let ledgerRunFrac: Double = 0.70
@@ -89,6 +111,20 @@ enum OfflineScoreColorizer {
                         let cleanedBinary = cleaned?.binaryPage
                         if debugFiltering {
                             print("[pipe] strokeCleaned=\(cleaned != nil) binaryOverride=\(cleanedBinary != nil)")
+                        }
+
+                        let baseImage = image
+                        let strokeClean = await buildStrokeCleanedImage(
+                            baseImage: baseImage,
+                            staffModel: staffModel,
+                            systems: systems
+                        )
+                        let cleanedImage = strokeClean?.image
+                        if debugStrokeErase {
+                            print("StrokeErase cleanedImage used: \(cleanedImage != nil)")
+                        }
+                        if cleanedImage == nil {
+                            debugMaskData = nil
                         }
 
                         // High recall note candidates

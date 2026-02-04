@@ -13,83 +13,90 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 14) {
+            ZStack(alignment: .bottomTrailing) {
+                VStack(spacing: 14) {
 
-                Text(status)
-                    .font(.headline)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(status)
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
-                if let url = coloredPDFURL {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Colored output (offline)")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        PDFKitView(url: url)
-                            .frame(maxWidth: CGFloat.infinity, maxHeight: 420)
-                            .cornerRadius(12)
-                    }
-                } else if let url = pickedPDFURL {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Input")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        PDFKitView(url: url)
-                            .frame(maxWidth: CGFloat.infinity, maxHeight: 420)
-                            .cornerRadius(12)
-                    }
-                } else {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 14)
-                            .strokeBorder(.secondary.opacity(0.35), lineWidth: 1)
-                            .frame(height: 220)
-                        VStack(spacing: 10) {
-                            Image(systemName: "music.note.list")
-                                .font(.system(size: 44))
-                                .foregroundStyle(.tint)
-                            Text("No PDF selected")
+                    if let url = coloredPDFURL {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Colored output (offline)")
+                                .font(.subheadline)
                                 .foregroundStyle(.secondary)
+                            PDFKitView(url: url)
+                                .frame(maxWidth: CGFloat.infinity, maxHeight: 420)
+                                .cornerRadius(12)
+                        }
+                    } else if let url = pickedPDFURL {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Input")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            PDFKitView(url: url)
+                                .frame(maxWidth: CGFloat.infinity, maxHeight: 420)
+                                .cornerRadius(12)
+                        }
+                    } else {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 14)
+                                .strokeBorder(.secondary.opacity(0.35), lineWidth: 1)
+                                .frame(height: 220)
+                            VStack(spacing: 10) {
+                                Image(systemName: "music.note.list")
+                                    .font(.system(size: 44))
+                                    .foregroundStyle(.tint)
+                                Text("No PDF selected")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
-                }
 
-                HStack(spacing: 10) {
-                    Button {
-                        showImporter = true
-                    } label: {
-                        Label("Import PDF", systemImage: "doc")
-                    }
-                    .buttonStyle(.borderedProminent)
+                    HStack(spacing: 10) {
+                        Button {
+                            showImporter = true
+                        } label: {
+                            Label("Import PDF", systemImage: "doc")
+                        }
+                        .buttonStyle(.borderedProminent)
 
 #if os(iOS)
-                    Button {
-                        showScanner = true
-                    } label: {
-                        Label("Scan", systemImage: "camera.viewfinder")
-                    }
-                    .buttonStyle(.bordered)
+                        Button {
+                            showScanner = true
+                        } label: {
+                            Label("Scan", systemImage: "camera.viewfinder")
+                        }
+                        .buttonStyle(.bordered)
 #endif
-                }
+                    }
 
-                Button {
-                    Task { await runOfflineColorize() }
-                } label: {
-                    Label(isProcessing ? "Colorizing…" : "Colorize Notes (Offline)", systemImage: "paintpalette")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(pickedPDFURL == nil || isProcessing)
-
-                if let coloredPDFURL {
-                    ShareLink(item: coloredPDFURL) {
-                        Label("Share Colored PDF", systemImage: "square.and.arrow.up")
+                    Button {
+                        Task { await runOfflineColorize() }
+                    } label: {
+                        Label(isProcessing ? "Colorizing…" : "Colorize Notes (Offline)", systemImage: "paintpalette")
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.bordered)
-                }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(pickedPDFURL == nil || isProcessing)
 
-                Spacer(minLength: 6)
+                    if let coloredPDFURL {
+                        ShareLink(item: coloredPDFURL) {
+                            Label("Share Colored PDF", systemImage: "square.and.arrow.up")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    Spacer(minLength: 6)
+                }
+                .padding()
+
+                Text("z")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding([.trailing, .bottom], 8)
             }
-            .padding()
             .navigationTitle("ColorCoded")
         }
         .fileImporter(
