@@ -181,17 +181,30 @@ enum OfflineScoreColorizer {
     private static func buildStrokeCleaned(baseImage: PlatformImage,
                                            staffModel: StaffModel?,
                                            systems: [SystemBlock]) async -> CleanedStrokeResult? {
-        guard let cg = baseImage.cgImageSafe, !systems.isEmpty else { return nil }
+        guard let cg = baseImage.cgImageSafe else { return nil }
 
         let spacing = max(6.0, staffModel?.lineSpacing ?? 12.0)
 
         // Raw candidates (high recall)
         let rawCandidates = await NoteheadDetector.detectNoteheads(in: baseImage)
 
+        let effectiveSystems: [SystemBlock]
+        if systems.isEmpty {
+            let fullPage = SystemBlock(
+                trebleLines: [],
+                bassLines: [],
+                spacing: spacing,
+                bbox: CGRect(x: 0, y: 0, width: cg.width, height: cg.height)
+            )
+            effectiveSystems = [fullPage]
+        } else {
+            effectiveSystems = systems
+        }
+
         return buildStrokeCleaned(
             cgImage: cg,
             spacing: spacing,
-            systems: systems,
+            systems: effectiveSystems,
             protectRects: rawCandidates
         )
     }
