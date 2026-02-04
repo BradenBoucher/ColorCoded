@@ -181,18 +181,30 @@ enum OfflineScoreColorizer {
     private static func buildStrokeCleaned(baseImage: PlatformImage,
                                            staffModel: StaffModel?,
                                            systems: [SystemBlock]) async -> CleanedStrokeResult? {
-        guard let cg = baseImage.cgImageSafe, !systems.isEmpty else { return nil }
-        if systems.allSatisfy({ $0.isFallback }) { return nil }
+        guard let cg = baseImage.cgImageSafe else { return nil }
 
         let spacing = max(6.0, staffModel?.lineSpacing ?? 12.0)
 
         // Raw candidates (high recall)
         let rawCandidates = await NoteheadDetector.detectNoteheads(in: baseImage)
 
+        let effectiveSystems: [SystemBlock]
+        if systems.isEmpty {
+            let fullPage = SystemBlock(
+                trebleLines: [],
+                bassLines: [],
+                spacing: spacing,
+                bbox: CGRect(x: 0, y: 0, width: cg.width, height: cg.height)
+            )
+            effectiveSystems = [fullPage]
+        } else {
+            effectiveSystems = systems
+        }
+
         return buildStrokeCleaned(
             cgImage: cg,
             spacing: spacing,
-            systems: systems,
+            systems: effectiveSystems,
             protectRects: rawCandidates
         )
     }
@@ -397,13 +409,18 @@ enum OfflineScoreColorizer {
         }
 
         // If systems not found, only do dedupe (avoid losing notes)
+        guard !systems.isEmpty else {
+            return DuplicateSuppressor.suppress(noteheads, spacing: fallbackSpacing)
+        }
+
+        // If systems not found, only do dedupe (avoid losing notes)
         // Build binary page once (reused across systems)
         let binaryPage: ([UInt8], Int, Int)? = binaryOverride ?? {
             guard let cgImage else { return nil }
             return buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         }()
 
-        // If systems not found, apply a stronger global safety net + dedupe (avoid losing notes)
+        // If systems not found, apply a light global safety net + dedupe (avoid losing notes)
         guard !systems.isEmpty else {
             if debugFiltering {
                 print("[filter] systems=0 (global safety net only)")
@@ -414,13 +431,7 @@ enum OfflineScoreColorizer {
                 binaryPage: binaryPage,
                 systems: []
             )
-            let tightened = filterNoteheadsGlobalHardReject(
-                globallyFiltered,
-                spacing: fallbackSpacing,
-                binaryPage: binaryPage
-            )
-            let noDenseRuns = removeDenseRuns(tightened, spacing: fallbackSpacing, minRun: 3)
-            let deduped = DuplicateSuppressor.suppress(noDenseRuns, spacing: fallbackSpacing)
+            let deduped = DuplicateSuppressor.suppress(globallyFiltered, spacing: fallbackSpacing)
             if debugFiltering {
                 print("[filter] out=\(deduped.count)")
             }
@@ -604,9 +615,6 @@ enum OfflineScoreColorizer {
             if debugFiltering {
                 print("[filter][outside] remaining=\(remaining.count) global=\(globallyFiltered.count) deduped=\(deduped.count)")
             }
-        }
-        if debugFiltering {
-            print("[filter] systems=\(systems.count) consumed=\(consumed.count) remaining=\(noteheads.count - consumed.count) out=\(out.count)")
         }
 
         return out
@@ -850,33 +858,10 @@ enum OfflineScoreColorizer {
                 return false
             }
 
-            if !systems.isEmpty {
-                let isVeryFlat = (rect.height < spacing * 0.28) && (rect.width > spacing * 1.10)
-                if isVeryFlat {
-                    let distance = minDistanceToAnyStaffLine(y: rect.midY, systems: systems)
-                    if distance > spacing * 0.65 { return false }
-                }
-            }
-            return true
-        }
-    }
-
-    private static func filterNoteheadsGlobalHardReject(_ rects: [CGRect],
-                                                        spacing: CGFloat,
-                                                        binaryPage: ([UInt8], Int, Int)?) -> [CGRect] {
-        guard !rects.isEmpty else { return [] }
-
-        return rects.filter { rect in
-            let w = rect.width
-            let h = rect.height
-            if h <= 0 { return false }
-            let aspect = w / h
-            if aspect > 6.0 && h < min(16.0, spacing * 0.45) {
-                return false
-            }
-            if let binaryPage,
-               shouldRejectAsLongHorizontalStroke(rect, binaryPage: binaryPage, spacing: spacing) {
-                return false
+            let isVeryFlat = (rect.height < spacing * 0.28) && (rect.width > spacing * 1.10)
+            if isVeryFlat {
+                let distance = minDistanceToAnyStaffLine(y: rect.midY, systems: systems)
+                if distance > spacing * 0.65 { return false }
             }
             return true
         }
