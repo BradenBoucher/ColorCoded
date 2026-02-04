@@ -396,6 +396,11 @@ enum OfflineScoreColorizer {
         }
 
         // If systems not found, only do dedupe (avoid losing notes)
+        guard !systems.isEmpty else {
+            return DuplicateSuppressor.suppress(noteheads, spacing: fallbackSpacing)
+        }
+
+        // If systems not found, only do dedupe (avoid losing notes)
         // Build binary page once (reused across systems)
         let binaryPage: ([UInt8], Int, Int)? = binaryOverride ?? {
             guard let cgImage else { return nil }
@@ -597,9 +602,6 @@ enum OfflineScoreColorizer {
             if debugFiltering {
                 print("[filter][outside] remaining=\(remaining.count) global=\(globallyFiltered.count) deduped=\(deduped.count)")
             }
-        }
-        if debugFiltering {
-            print("[filter] systems=\(systems.count) consumed=\(consumed.count) remaining=\(noteheads.count - consumed.count) out=\(out.count)")
         }
 
         return out
@@ -843,12 +845,10 @@ enum OfflineScoreColorizer {
                 return false
             }
 
-            if !systems.isEmpty {
-                let isVeryFlat = (rect.height < spacing * 0.28) && (rect.width > spacing * 1.10)
-                if isVeryFlat {
-                    let distance = minDistanceToAnyStaffLine(y: rect.midY, systems: systems)
-                    if distance > spacing * 0.65 { return false }
-                }
+            let isVeryFlat = (rect.height < spacing * 0.28) && (rect.width > spacing * 1.10)
+            if isVeryFlat {
+                let distance = minDistanceToAnyStaffLine(y: rect.midY, systems: systems)
+                if distance > spacing * 0.65 { return false }
             }
             return true
         }
