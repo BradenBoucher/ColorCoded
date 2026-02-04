@@ -708,11 +708,15 @@ enum OfflineScoreColorizer {
                 barlines: barlinesInSystem
             )
 
+            let artifactFiltered = ArtifactRejector.rejectArtifacts(
+                noDenseRuns,
+                cg: binaryCGImage ?? fallbackCGImage(),
+                spacing: spacing,
+                barlines: barlinesInSystem
+            )
+
             // Final light dedupe
-            var deduped = DuplicateSuppressor.suppress(artifactFiltered, spacing: spacing)
-            if deduped.isEmpty, !artifactFiltered.isEmpty {
-                deduped = artifactFiltered
-            }
+            let deduped = DuplicateSuppressor.suppress(artifactFiltered, spacing: spacing)
             out.append(contentsOf: deduped)
 
             if debugFiltering {
