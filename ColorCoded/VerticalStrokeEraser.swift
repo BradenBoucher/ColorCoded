@@ -1,9 +1,15 @@
+import Foundation
 import CoreGraphics
 
+/// Detect + erase thin stroke-like ink (stems/tails/slurs/ties fragments) from a binary ink map.
+/// - binary: 1 = ink, 0 = white
 enum VerticalStrokeEraser {
+
     struct Result {
-        let strokeMask: [UInt8]
         let binaryWithoutStrokes: [UInt8]
+        let strokeMask: [UInt8]          // 1 where we consider pixels "stroke"
+        let erasedCount: Int             // number of pixels cleared (not protected)
+        let totalStrokeCount: Int        // total stroke pixels (including protected zones)
     }
 
     static func eraseStrokes(binary: [UInt8],
@@ -12,118 +18,280 @@ enum VerticalStrokeEraser {
                              systemRect: CGRect,
                              spacing: CGFloat,
                              protectMask: [UInt8]) -> Result {
-        guard width > 0, height > 0, binary.count == width * height else {
-            return Result(strokeMask: [], binaryWithoutStrokes: binary)
+
+        guard binary.count == width * height,
+              protectMask.count == width * height else {
+            return Result(binaryWithoutStrokes: binary,
+                          strokeMask: [UInt8](repeating: 0, count: max(0, width * height)),
+                          erasedCount: 0,
+                          totalStrokeCount: 0)
         }
 
-        let clipped = systemRect.intersection(CGRect(x: 0, y: 0, width: width, height: height))
-        guard clipped.width > 1, clipped.height > 1 else {
-            return Result(strokeMask: [], binaryWithoutStrokes: binary)
+        let u = max(6.0, spacing)
+
+        // --- Tunables ---
+        let minRun = max(10, Int((2.2 * u).rounded()))
+        let maxGap = max(1, Int((0.12 * u).rounded()))
+        let maxWidth = max(2, Int((0.15 * u).rounded()))
+        let longRunThreshold = Int((3.2 * u).rounded())
+        let maxWidthLong = max(4, Int((0.22 * u).rounded()))
+        let dilateR = max(1, Int((0.06 * u).rounded()))
+
+        // Extra pass: diagonal/curved thin components (tails/slurs)
+        let thinWidth = max(2, Int((0.10 * u).rounded()))
+        let compLongSideMin = max(12, Int((1.25 * u).rounded()))
+        let compShortSideMax = max(3, Int((0.24 * u).rounded()))
+        let compMinPixels = max(22, Int((0.55 * u).rounded()))
+
+        let roi = systemRect.intersection(CGRect(x: 0, y: 0, width: width, height: height))
+        if roi.width < 2 || roi.height < 2 {
+            return Result(binaryWithoutStrokes: binary,
+                          strokeMask: [UInt8](repeating: 0, count: width * height),
+                          erasedCount: 0,
+                          totalStrokeCount: 0)
         }
 
-        let x0 = max(0, Int(floor(clipped.minX)))
-        let y0 = max(0, Int(floor(clipped.minY)))
-        let x1 = min(width, Int(ceil(clipped.maxX)))
-        let y1 = min(height, Int(ceil(clipped.maxY)))
-
-        let minRun = max(4, Int(round(spacing * 2.8)))
-        let maxWidth = max(2, Int(round(spacing * 0.10)))
+        let x0 = max(0, Int(floor(roi.minX)))
+        let y0 = max(0, Int(floor(roi.minY)))
+        let x1 = min(width - 1, Int(ceil(roi.maxX)))
+        let y1 = min(height - 1, Int(ceil(roi.maxY)))
 
         var strokeMask = [UInt8](repeating: 0, count: width * height)
 
-        let gapMax = 2
+        @inline(__always) func idx(_ x: Int, _ y: Int) -> Int { y * width + x }
+        @inline(__always) func ink(_ x: Int, _ y: Int) -> Bool { binary[idx(x, y)] != 0 }
 
-        for x in x0..<x1 {
-            var runStart = y0
-            var runLength = 0
+        @inline(__always) func findInkNeighborX(_ baseX: Int, _ y: Int) -> Int? {
+            if ink(baseX, y) { return baseX }
+            if baseX > 0 && ink(baseX - 1, y) { return baseX - 1 }
+            if baseX + 1 < width && ink(baseX + 1, y) { return baseX + 1 }
+            return nil
+        }
+
+        @inline(__always) func localWidthAt(_ x: Int, _ y: Int) -> Int {
+            if thinWidth <= 2 {
+                var w = 0
+                if x > 0 && ink(x - 1, y) { w += 1 }
+                if ink(x, y) { w += 1 }
+                if x + 1 < width && ink(x + 1, y) { w += 1 }
+                return w
+            } else {
+                let r = min(2, thinWidth)
+                var w = 0
+                for xx in max(0, x - r)...min(width - 1, x + r) {
+                    if ink(xx, y) { w += 1 }
+                }
+                return w
+            }
+        }
+
+        // ------------------------------------------------------------
+        // PASS 1: long thin vertical runs
+        // ------------------------------------------------------------
+        for x in x0...x1 {
+            var runStart: Int? = nil
+            var runInkCount = 0
+            var runWidthSum = 0
             var gapCount = 0
+            var runPixels: [(Int, Int)] = []
+            runPixels.reserveCapacity(256)
 
-            func commitRun(endYExclusive: Int) {
-                guard runLength >= minRun else { return }
-                var thinCount = 0
-                for y in runStart..<endYExclusive {
-                    let row = y * width
-                    var widthCount = 0
-                    for xx in max(x - 1, x0)..<min(x + 2, x1) {
-                        if binary[row + xx] != 0 { widthCount += 1 }
+            func flushRun(at yEndExclusive: Int) {
+                guard let ys = runStart else { return }
+                let ye = yEndExclusive
+                let runLen = ye - ys
+                if runLen >= minRun && runInkCount > 0 {
+                    let avgW = Double(runWidthSum) / Double(runInkCount)
+                    let widthLimit = runLen >= longRunThreshold ? Double(maxWidthLong) : Double(maxWidth)
+                    if avgW <= widthLimit {
+                        for (px, py) in runPixels {
+                            if py >= y0 && py <= y1 {
+                                strokeMask[idx(px, py)] = 1
+                            }
+                        }
                     }
-                    if widthCount <= maxWidth { thinCount += 1 }
                 }
-                let thinFrac = Double(thinCount) / Double(max(1, runLength))
-                guard thinFrac > 0.60 else { return }
-                for y in runStart..<endYExclusive {
-                    strokeMask[y * width + x] = 1
-                }
+                runStart = nil
+                runInkCount = 0
+                runWidthSum = 0
+                gapCount = 0
+                runPixels.removeAll(keepingCapacity: true)
             }
 
-            for y in y0..<y1 {
-                let idx = y * width + x
-                if binary[idx] != 0 {
-                    if runLength == 0 { runStart = y }
-                    runLength += 1
+            for y in y0...y1 {
+                if let nx = (runStart != nil ? findInkNeighborX(x, y) : (ink(x, y) ? x : nil)) {
+                    if runStart == nil { runStart = y }
+                    runInkCount += 1
+                    runWidthSum += localWidthAt(nx, y)
                     gapCount = 0
-                } else if runLength > 0 {
+                    runPixels.append((nx, y))
+                } else if runStart != nil {
                     gapCount += 1
-                    if gapCount <= gapMax {
-                        runLength += 1
-                    } else {
-                        let runEnd = y - gapCount + 1
-                        commitRun(endYExclusive: runEnd)
-                        runLength = 0
-                        gapCount = 0
+                    if gapCount > maxGap {
+                        flushRun(at: y - gapCount + 1)
                     }
                 }
             }
-            if runLength > 0 {
-                commitRun(endYExclusive: y1)
+
+            if runStart != nil {
+                flushRun(at: y1 + 1)
             }
         }
 
-        let dilated = dilate(mask: strokeMask,
-                             width: width,
-                             height: height,
-                             rect: clipped,
-                             radius: max(1, Int(round(spacing * 0.06))))
+        // ------------------------------------------------------------
+        // PASS 2: thin diagonal/curved components (tails/slurs/ties)
+        // ------------------------------------------------------------
+        let roiW = x1 - x0 + 1
+        let roiH = y1 - y0 + 1
+        var thin = [UInt8](repeating: 0, count: roiW * roiH)
+        var visited = [UInt8](repeating: 0, count: roiW * roiH)
 
-        var cleaned = binary
-        for y in y0..<y1 {
+        @inline(__always) func ridx(_ x: Int, _ y: Int) -> Int { (y - y0) * roiW + (x - x0) }
+
+        for y in y0...y1 {
+            for x in x0...x1 {
+                if ink(x, y) && localWidthAt(x, y) <= thinWidth {
+                    thin[ridx(x, y)] = 1
+                }
+            }
+        }
+
+        let neighbor8 = [(-1,-1),(0,-1),(1,-1),
+                         (-1, 0),       (1, 0),
+                         (-1, 1),(0, 1),(1, 1)]
+
+        var stackX: [Int] = []
+        var stackY: [Int] = []
+        stackX.reserveCapacity(2048)
+        stackY.reserveCapacity(2048)
+
+        for y in y0...y1 {
+            for x in x0...x1 {
+                let ri = ridx(x, y)
+                if thin[ri] == 0 || visited[ri] != 0 { continue }
+
+                visited[ri] = 1
+                stackX.removeAll(keepingCapacity: true)
+                stackY.removeAll(keepingCapacity: true)
+                stackX.append(x)
+                stackY.append(y)
+
+                var minX = x, maxX = x, minY = y, maxY = y
+                var pixels = 0
+
+                while let cx = stackX.popLast(), let cy = stackY.popLast() {
+                    pixels += 1
+                    minX = min(minX, cx); maxX = max(maxX, cx)
+                    minY = min(minY, cy); maxY = max(maxY, cy)
+
+                    for (dx, dy) in neighbor8 {
+                        let nx = cx + dx
+                        let ny = cy + dy
+                        if nx < x0 || nx > x1 || ny < y0 || ny > y1 { continue }
+                        let ni = ridx(nx, ny)
+                        if thin[ni] != 0 && visited[ni] == 0 {
+                            visited[ni] = 1
+                            stackX.append(nx)
+                            stackY.append(ny)
+                        }
+                    }
+                }
+
+                if pixels < compMinPixels { continue }
+
+                let bboxW = maxX - minX + 1
+                let bboxH = maxY - minY + 1
+                let longSide = max(bboxW, bboxH)
+                let shortSide = min(bboxW, bboxH)
+
+                if longSide >= compLongSideMin && shortSide <= compShortSideMax {
+                    for yy in minY...maxY {
+                        for xx in minX...maxX {
+                            if ink(xx, yy) {
+                                strokeMask[idx(xx, yy)] = 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ------------------------------------------------------------
+        // Dilate stroke mask (inside ROI)
+        // ------------------------------------------------------------
+        if dilateR > 0 {
+            var dilated = strokeMask
+            for y in y0...y1 {
+                for x in x0...x1 {
+                    if strokeMask[idx(x, y)] == 0 { continue }
+                    let dx = 1
+                    let dy = dilateR + 1
+                    let xx0 = max(x0, x - dx)
+                    let xx1 = min(x1, x + dx)
+                    let yy0 = max(y0, y - dy)
+                    let yy1 = min(y1, y + dy)
+                    for yy in yy0...yy1 {
+                        let row = yy * width
+                        for xx in xx0...xx1 {
+                            dilated[row + xx] = 1
+                        }
+                    }
+                }
+            }
+            strokeMask = dilated
+        }
+
+        // ------------------------------------------------------------
+        // Row wipe: if a row has a run of >=5 touching stroke pixels, remove whole row
+        // ------------------------------------------------------------
+        let rowRunThreshold = 5
+        for y in y0...y1 {
+            var run = 0
+            var hasLongRun = false
             let row = y * width
-            for x in x0..<x1 {
-                let idx = row + x
-                if dilated[idx] != 0 && protectMask[idx] == 0 {
-                    cleaned[idx] = 0
+            for x in x0...x1 {
+                if strokeMask[row + x] != 0 {
+                    run += 1
+                    if run >= rowRunThreshold {
+                        hasLongRun = true
+                        break
+                    }
+                } else {
+                    run = 0
+                }
+            }
+            if hasLongRun {
+                for x in x0...x1 {
+                    strokeMask[row + x] = 1
                 }
             }
         }
 
-        return Result(strokeMask: dilated, binaryWithoutStrokes: cleaned)
-    }
+        // ------------------------------------------------------------
+        // Apply erase (respect protectMask)
+        // ------------------------------------------------------------
+        var out = binary
+        var erased = 0
+        var strokeTotal = 0
 
-    private static func dilate(mask: [UInt8],
-                               width: Int,
-                               height: Int,
-                               rect: CGRect,
-                               radius: Int) -> [UInt8] {
-        guard radius > 0 else { return mask }
-        var out = mask
-
-        let x0 = max(0, Int(floor(rect.minX)))
-        let y0 = max(0, Int(floor(rect.minY)))
-        let x1 = min(width, Int(ceil(rect.maxX)))
-        let y1 = min(height, Int(ceil(rect.maxY)))
-
-        for y in y0..<y1 {
-            for x in x0..<x1 {
-                guard mask[y * width + x] != 0 else { continue }
-                for yy in max(y - radius, y0)..<min(y + radius + 1, y1) {
-                    let row = yy * width
-                    for xx in max(x - radius, x0)..<min(x + radius + 1, x1) {
-                        out[row + xx] = 1
+        for y in y0...y1 {
+            let row = y * width
+            for x in x0...x1 {
+                let i = row + x
+                if strokeMask[i] != 0 {
+                    strokeTotal += 1
+                    if protectMask[i] != 0 { continue }
+                    if out[i] != 0 {
+                        out[i] = 0
+                        erased += 1
                     }
                 }
             }
         }
 
-        return out
+        return Result(binaryWithoutStrokes: out,
+                      strokeMask: strokeMask,
+                      erasedCount: erased,
+                      totalStrokeCount: strokeTotal)
     }
 }
