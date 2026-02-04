@@ -208,7 +208,7 @@ enum OfflineScoreColorizer {
         // Protect mask (tight!)
         var protectMask = [UInt8](repeating: 0, count: w * h)
         let minDim = 0.35 * u
-        let maxDim = 1.8 * u
+        let maxDim = 1.6 * u
 
         for rect in protectRects {
             let rw = rect.width
@@ -229,11 +229,11 @@ enum OfflineScoreColorizer {
 
             // Don’t protect if near obvious vertical stroke areas
             if let gsm = globalStrokeMask {
-                let neighborhood = rect.insetBy(dx: -1.0 * u, dy: -0.8 * u)
-                if gsm.overlapRatio(with: neighborhood) > 0.12 { continue }
+                let neighborhood = rect.insetBy(dx: -0.9 * u, dy: -0.7 * u)
+                if gsm.overlapRatio(with: neighborhood) > 0.08 { continue }
             }
 
-            let expanded = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u)
+            let expanded = rect.insetBy(dx: -0.12 * u, dy: -0.12 * u)
             markMask(&protectMask, rect: expanded, width: w, height: h)
         }
 

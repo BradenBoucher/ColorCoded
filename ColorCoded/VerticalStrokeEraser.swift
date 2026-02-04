@@ -30,16 +30,16 @@ enum VerticalStrokeEraser {
         let u = max(6.0, spacing)
 
         // --- Tunables ---
-        let minRun = max(10, Int((2.2 * u).rounded()))
-        let maxGap = max(1, Int((0.12 * u).rounded()))
-        let maxWidth = max(2, Int((0.15 * u).rounded()))
-        let dilateR = max(1, Int((0.06 * u).rounded()))
+        let minRun = max(12, Int((2.6 * u).rounded()))
+        let maxGap = max(1, Int((0.10 * u).rounded()))
+        let maxWidth = max(2, Int((0.12 * u).rounded()))
+        let dilateR = max(1, Int((0.10 * u).rounded()))
 
         // Extra pass: diagonal/curved thin components (tails/slurs)
-        let thinWidth = max(2, Int((0.12 * u).rounded()))
-        let compLongSideMin = max(10, Int((1.15 * u).rounded()))
-        let compShortSideMax = max(3, Int((0.28 * u).rounded()))
-        let compMinPixels = max(18, Int((0.45 * u).rounded()))
+        let thinWidth = max(2, Int((0.10 * u).rounded()))
+        let compLongSideMin = max(12, Int((1.25 * u).rounded()))
+        let compShortSideMax = max(3, Int((0.24 * u).rounded()))
+        let compMinPixels = max(22, Int((0.55 * u).rounded()))
 
         let roi = systemRect.intersection(CGRect(x: 0, y: 0, width: width, height: height))
         if roi.width < 2 || roi.height < 2 {
