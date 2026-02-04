@@ -9,7 +9,11 @@ import UIKit
 import AppKit
 #endif
 
+private let DEBUG_OVERLAY = true
 private let debugStrokeErase = true
+private let debugFiltering = true
+private let debugDrawSystems = false
+private let debugDrawMasks = false
 
 private struct DebugMaskData {
     let strokeMask: [UInt8]
@@ -72,6 +76,9 @@ enum OfflineScoreColorizer {
                     Task {
                         let staffModel = await StaffDetector.detectStaff(in: image)
                         let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
+                        if debugFiltering {
+                            print("[pipe] page=\(pageIndex) staffSpacing=\(staffModel?.lineSpacing ?? -1) systems=\(systems.count)")
+                        }
 
                         // Build stroke-cleaned image AND keep the cleaned binary.
                         let cleaned = await buildStrokeCleaned(baseImage: image,
@@ -80,9 +87,20 @@ enum OfflineScoreColorizer {
 
                         let cleanedImage = cleaned?.image
                         let cleanedBinary = cleaned?.binaryPage
+                        if debugFiltering {
+                            print("[pipe] strokeCleaned=\(cleaned != nil) binaryOverride=\(cleanedBinary != nil)")
+                        }
 
                         // High recall note candidates
                         let detection = await NoteheadDetector.detectDebug(in: cleanedImage ?? image)
+
+                        if debugFiltering {
+                            let insideCount = detection.noteRects.filter { rect in
+                                let center = CGPoint(x: rect.midX, y: rect.midY)
+                                return systems.contains { $0.bbox.contains(center) }
+                            }.count
+                            print("[sanity] insideSystems=\(insideCount) / total=\(detection.noteRects.count)")
+                        }
 
                         // Barlines
                         let barlines = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
@@ -100,9 +118,20 @@ enum OfflineScoreColorizer {
                         let colored = drawOverlays(
                             on: image,
                             staff: staffModel,
+                            systems: systems,
                             noteheads: filtered,
                             barlines: barlines
                         )
+
+                        if DEBUG_OVERLAY {
+                            if let binaryDebug = debugBinaryImage(cleanedBinary: cleanedBinary, cgImage: image.cgImageSafe) {
+                                saveDebugImage(binaryDebug, name: "page-\(pageIndex)-binary")
+                            }
+                            if let barlineOverlay = drawBarlinesOverlay(on: image, barlines: barlines) {
+                                saveDebugImage(barlineOverlay, name: "page-\(pageIndex)-barlines")
+                            }
+                            saveDebugImage(colored, name: "page-\(pageIndex)-final")
+                        }
 
                         if let pdfPage = PDFPage(image: colored) {
                             outDoc.insert(pdfPage, at: outDoc.pageCount)
@@ -172,25 +201,41 @@ enum OfflineScoreColorizer {
     private static func buildStrokeCleaned(baseImage: PlatformImage,
                                            staffModel: StaffModel?,
                                            systems: [SystemBlock]) async -> CleanedStrokeResult? {
-        guard let cg = baseImage.cgImageSafe, !systems.isEmpty else { return nil }
+        guard let cg = baseImage.cgImageSafe else { return nil }
+        let staffCleanedCG = staffModel.flatMap { StaffLineEraser.eraseStaffLines(in: cg, staff: $0) } ?? cg
 
         let spacing = max(6.0, staffModel?.lineSpacing ?? 12.0)
 
         // Raw candidates (high recall)
         let rawCandidates = await NoteheadDetector.detectNoteheads(in: baseImage)
 
+        let effectiveSystems: [SystemBlock]
+        if systems.isEmpty {
+            let fullPage = SystemBlock(
+                trebleLines: [],
+                bassLines: [],
+                spacing: spacing,
+                bbox: CGRect(x: 0, y: 0, width: cg.width, height: cg.height)
+            )
+            effectiveSystems = [fullPage]
+        } else {
+            effectiveSystems = systems
+        }
+
         return buildStrokeCleaned(
-            cgImage: cg,
+            cgImage: staffCleanedCG,
             spacing: spacing,
-            systems: systems,
-            protectRects: rawCandidates
+            systems: effectiveSystems,
+            protectRects: rawCandidates,
+            skipStrokeErase: true
         )
     }
 
     private static func buildStrokeCleaned(cgImage: CGImage,
                                            spacing: CGFloat,
                                            systems: [SystemBlock],
-                                           protectRects: [CGRect]) -> CleanedStrokeResult? {
+                                           protectRects: [CGRect],
+                                           skipStrokeErase: Bool) -> CleanedStrokeResult? {
 
         let (bin, w, h) = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         var binary = bin
@@ -207,8 +252,8 @@ enum OfflineScoreColorizer {
 
         // Protect mask (tight!)
         var protectMask = [UInt8](repeating: 0, count: w * h)
-        let minDim = 0.35 * u
-        let maxDim = 1.6 * u
+        let minDim = 0.30 * u
+        let maxDim = 2.0 * u
 
         for rect in protectRects {
             let rw = rect.width
@@ -218,52 +263,75 @@ enum OfflineScoreColorizer {
 
             // Reject skinny strokes early
             let aspect = max(rw / max(1, rh), rh / max(1, rw))
-            if aspect > 2.2 { continue }
+            if aspect > 3.0 { continue }
 
             // Reject ultra tiny specks
             if rw < 0.25 * u && rh < 0.25 * u { continue }
 
             // Require some fill (tails often low fill)
             let fill = rectInkExtent(rect, bin: binary, pageW: w, pageH: h)
-            if fill < 0.10 { continue }
+            if fill < 0.06 { continue }
+
+            let expanded = rect.insetBy(dx: -0.30 * u, dy: -0.30 * u)
+            let expandedFill = rectInkExtent(expanded, bin: binary, pageW: w, pageH: h)
+            let expandedPCA = lineLikenessPCA(expanded, bin: binary, pageW: w, pageH: h)
+            let isBlobLike = expandedFill >= 0.18 &&
+                expandedPCA.eccentricity <= 6.0 &&
+                min(rw, rh) >= 0.24 * u
+            if !isBlobLike { continue }
 
             // Don’t protect if near obvious vertical stroke areas
             if let gsm = globalStrokeMask {
-                let neighborhood = rect.insetBy(dx: -0.9 * u, dy: -0.7 * u)
-                if gsm.overlapRatio(with: neighborhood) > 0.08 { continue }
+                let neighborhood = rect.insetBy(dx: -1.0 * u, dy: -0.8 * u)
+                if gsm.overlapRatio(with: neighborhood) > 0.25 { continue }
             }
 
-            let expanded = rect.insetBy(dx: -0.12 * u, dy: -0.12 * u)
-            markMask(&protectMask, rect: expanded, width: w, height: h)
+            let core = rect.insetBy(dx: -0.35 * u, dy: -0.35 * u)
+            markMask(&protectMask, rect: core, width: w, height: h)
         }
 
-        // Erase strokes per system
-        var lastStrokeMask: [UInt8]?
-        for system in systems {
-            let result = VerticalStrokeEraser.eraseStrokes(
-                binary: binary,
-                width: w,
-                height: h,
-                systemRect: system.bbox,
-                spacing: spacing,
-                protectMask: protectMask
-            )
+        if !skipStrokeErase {
+            // Erase strokes per system
+            var lastStrokeMask: [UInt8]?
+            for system in systems {
+                let result = VerticalStrokeEraser.eraseStrokes(
+                    binary: binary,
+                    width: w,
+                    height: h,
+                    systemRect: system.bbox,
+                    spacing: spacing,
+                    protectMask: protectMask
+                )
+
+                if debugStrokeErase {
+                    lastStrokeMask = result.strokeMask
+                    print("StrokeErase system erased=\(result.erasedCount) strokeTotal=\(result.totalStrokeCount)")
+                }
+
+                binary = result.binaryWithoutStrokes
+            }
 
             if debugStrokeErase {
-                lastStrokeMask = result.strokeMask
-                print("StrokeErase system erased=\(result.erasedCount) strokeTotal=\(result.totalStrokeCount)")
+                let u = max(7.0, spacing)
+                let sampleStride = max(1, protectRects.count / 30)
+                for (idx, rect) in protectRects.enumerated() where idx % sampleStride == 0 {
+                    let core = rect.insetBy(dx: -0.35 * u, dy: -0.35 * u)
+                    let fillBefore = rectInkExtent(core, bin: bin, pageW: w, pageH: h)
+                    let fillAfter = rectInkExtent(core, bin: binary, pageW: w, pageH: h)
+                    if fillBefore > 0.05 && fillAfter < 0.6 * fillBefore {
+                        print("StrokeErase warning: protect rect lost ink before=\(fillBefore) after=\(fillAfter)")
+                    }
+                }
             }
 
-            binary = result.binaryWithoutStrokes
-        }
-
-        if debugStrokeErase, let sm = lastStrokeMask {
-            debugMaskData = DebugMaskData(
-                strokeMask: sm,
-                protectMask: protectMask,
-                width: w,
-                height: h
-            )
+            if debugStrokeErase, let sm = lastStrokeMask {
+                debugMaskData = DebugMaskData(
+                    strokeMask: sm,
+                    protectMask: protectMask,
+                    width: w,
+                    height: h
+                )
+            }
         }
 
         guard let cleanedCG = buildBinaryCGImage(from: binary, width: w, height: h),
@@ -327,6 +395,69 @@ enum OfflineScoreColorizer {
         #endif
     }
 
+    private static func debugBinaryImage(cleanedBinary: ([UInt8], Int, Int)?,
+                                         cgImage: CGImage?) -> PlatformImage? {
+        if let cleanedBinary,
+           let cg = buildBinaryCGImage(from: cleanedBinary.0, width: cleanedBinary.1, height: cleanedBinary.2) {
+            return makePlatformImage(from: cg)
+        }
+        guard let cgImage else { return nil }
+        let binary = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
+        guard let cg = buildBinaryCGImage(from: binary.0, width: binary.1, height: binary.2) else { return nil }
+        return makePlatformImage(from: cg)
+    }
+
+    private static func drawBarlinesOverlay(on image: PlatformImage,
+                                            barlines: [CGRect]) -> PlatformImage? {
+        #if canImport(UIKit)
+        let renderer = UIGraphicsImageRenderer(size: image.size)
+        return renderer.image { ctx in
+            image.draw(at: .zero)
+            ctx.cgContext.setAlpha(0.85)
+            if !barlines.isEmpty {
+                ctx.cgContext.setStrokeColor(UIColor.systemTeal.withAlphaComponent(0.75).cgColor)
+                ctx.cgContext.setLineWidth(2.0)
+                for rect in barlines {
+                    ctx.cgContext.stroke(rect)
+                }
+            }
+        }
+        #else
+        return nil
+        #endif
+    }
+
+    private static func saveDebugImage(_ image: PlatformImage, name: String) {
+        #if canImport(UIKit)
+        guard let data = image.pngData() else { return }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).png")
+        try? data.write(to: url)
+        #endif
+    }
+
+    private static func fallbackCGImage() -> CGImage {
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let w = 1
+        let h = 1
+        let bytesPerRow = w * 4
+        var rgba: [UInt8] = [255, 255, 255, 255]
+        let ctx = CGContext(
+            data: &rgba,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )
+        return ctx!.makeImage()!
+    }
+
+    private static func passesStaffProximity(rect: CGRect, spacing: CGFloat, systems: [SystemBlock]) -> Bool {
+        let distance = minDistanceToAnyStaffLine(y: rect.midY, systems: systems)
+        return distance <= spacing * 3.0
+    }
+
     // ------------------------------------------------------------------
     // Everything BELOW here: keep your existing functions exactly as-is.
     // You already pasted them and they compile. No changes required there:
@@ -361,28 +492,53 @@ enum OfflineScoreColorizer {
                                                   cgImage: CGImage?,
                                                   binaryOverride: ([UInt8], Int, Int)?) -> [CGRect] {
         guard !noteheads.isEmpty else { return [] }
+        if debugFiltering {
+            print("[filter] total candidates: \(noteheads.count)")
+        }
 
         // If systems not found, only do dedupe (avoid losing notes)
         guard !systems.isEmpty else {
             return DuplicateSuppressor.suppress(noteheads, spacing: fallbackSpacing)
         }
 
+        // If systems not found, only do dedupe (avoid losing notes)
         // Build binary page once (reused across systems)
         let binaryPage: ([UInt8], Int, Int)? = binaryOverride ?? {
             guard let cgImage else { return nil }
             return buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         }()
+        let binaryCGImage = binaryPage.flatMap { buildBinaryCGImage(from: $0.0, width: $0.1, height: $0.2) } ?? cgImage
+
+        // If systems not found, apply a light global safety net + dedupe (avoid losing notes)
+        guard !systems.isEmpty else {
+            if debugFiltering {
+                print("[filter] systems=0 (global safety net only)")
+            }
+            let globallyFiltered = filterNoteheadsGlobalSafetyNet(
+                noteheads,
+                spacing: fallbackSpacing,
+                binaryPage: binaryPage,
+                systems: []
+            )
+            let deduped = DuplicateSuppressor.suppress(globallyFiltered, spacing: fallbackSpacing)
+            if debugFiltering {
+                print("[filter] out=\(deduped.count)")
+            }
+            return deduped
+        }
 
         var out: [CGRect] = []
         var consumed = Set<Int>()
 
-        for system in systems {
+        for (systemIndex, system) in systems.enumerated() {
             let spacing = max(6.0, system.spacing)
+            let isFallback = system.isFallback
 
             // barline Xs within system (used for penalties + barline veto)
-            let barlineXs = barlines
-                .filter { $0.maxY >= system.bbox.minY && $0.minY <= system.bbox.maxY }
-                .map { $0.midX }
+            let barlinesInSystem = barlines.filter {
+                $0.maxY >= system.bbox.minY && $0.minY <= system.bbox.maxY
+            }
+            let barlineXs = barlinesInSystem.map { $0.midX }
 
             // Symbol zone (clef/key/time region)
             let symbolZone: CGRect = {
@@ -431,16 +587,28 @@ enum OfflineScoreColorizer {
             }
 
             // Remove symbol zone only (safe)
-            let noSymbols = systemRects.filter { r in
+            let noSymbols = isFallback ? systemRects : systemRects.filter { r in
                 !symbolZone.contains(CGPoint(x: r.midX, y: r.midY))
             }
 
-            // Staff-step gate
-            let scored0 = noSymbols.map { ScoredHead(rect: $0) }
-            let gated0 = StaffStepGate.filterCandidates(scored0, system: system)
+            // Aggressive tail cutoff: drop anything in the trailing margin.
+            // This intentionally sacrifices notes to prevent right-edge artifacts.
+            let tailCutoffX: CGFloat = {
+                if let rightmostBarline = barlinesInSystem.max(by: { $0.maxX < $1.maxX }) {
+                    return min(system.bbox.maxX, rightmostBarline.maxX + spacing * 0.8)
+                }
+                return system.bbox.maxX - spacing * 0.6
+            }()
 
-            // ✅ NEW: compute shapeScore BEFORE clustering/suppression so junk loses
-            let gated = gated0.map { head -> ScoredHead in
+            let noTail = isFallback ? noSymbols : noSymbols.filter { r in
+                r.midX <= tailCutoffX
+            }
+
+            // Staff-step gate
+            let scored0 = noTail.map { ScoredHead(rect: $0) }
+
+            // Temporarily disable StaffStepGate to validate system alignment.
+            let gated = scored0.map { head -> ScoredHead in
                 var h = head
                 guard let binaryPage else { return h }
 
@@ -479,9 +647,26 @@ enum OfflineScoreColorizer {
                     s *= 0.35
                 }
 
+                if let match = StaffStepGate.bestClefAndStepSoft(
+                    y: h.rect.midY,
+                    trebleLines: system.trebleLines,
+                    bassLines: system.bassLines,
+                    spacing: system.spacing,
+                    maxSteps: 22,
+                    preferBassInGap: true
+                ) {
+                    h.clef = match.clef
+                    h.staffStepIndex = match.snap.stepIndex
+                    h.staffStepError = match.snap.stepError
+                }
+
                 // Clamp
                 h.shapeScore = max(0, min(1, s))
                 return h
+            }
+
+            if debugFiltering {
+                print("[dbg][system \(systemIndex)] preDense input=\(gated.count) spacing=\(spacing) bbox=\(system.bbox)")
             }
 
             // Chord-aware suppression early (now informed by shapeScore)
@@ -497,17 +682,46 @@ enum OfflineScoreColorizer {
                                          barlineXs: barlineXs)
             }
 
+            let preDenseRuns = removeDenseRunsScored(pruned, spacing: spacing, minRun: 3)
+
             // ✅ Consolidate (stepIndex + X bin) keeps true head, drops duplicates
-            let consolidated = consolidateByStepAndX(
-                pruned,
+            var consolidated = consolidateByStepAndX(
+                preDenseRuns,
                 spacing: spacing,
                 barlineXs: barlineXs,
                 binaryPage: binaryPage
             )
+            if consolidated.isEmpty, !preDenseRuns.isEmpty {
+                consolidated = preDenseRuns.map { $0.rect }
+            }
+
+            // Aggressive run-kill: drop runs of 3+ tightly packed markers (unconditional).
+            var noDenseRuns = removeDenseRuns(consolidated, spacing: spacing, minRun: 3)
+            if noDenseRuns.isEmpty, !consolidated.isEmpty {
+                noDenseRuns = consolidated
+            }
+
+            let artifactFiltered = ArtifactRejector.rejectArtifacts(
+                noDenseRuns,
+                cg: binaryCGImage ?? fallbackCGImage(),
+                spacing: spacing,
+                barlines: barlinesInSystem
+            )
+
+            let artifactFiltered = ArtifactRejector.rejectArtifacts(
+                noDenseRuns,
+                cg: binaryCGImage ?? fallbackCGImage(),
+                spacing: spacing,
+                barlines: barlinesInSystem
+            )
 
             // Final light dedupe
-            let deduped = DuplicateSuppressor.suppress(consolidated, spacing: spacing)
+            let deduped = DuplicateSuppressor.suppress(artifactFiltered, spacing: spacing)
             out.append(contentsOf: deduped)
+
+            if debugFiltering {
+                print("[filter][system \(systemIndex)] systemRects=\(systemRects.count) noSymbols=\(noSymbols.count) noTail=\(noTail.count) gated=\(gated.count) clustered=\(clustered.count) pruned=\(pruned.count) preDense=\(preDenseRuns.count) consolidated=\(consolidated.count) noDense=\(noDenseRuns.count) deduped=\(deduped.count)")
+            }
         }
 
         // Remaining outside systems: only dedupe (do not drop notes)
@@ -516,7 +730,26 @@ enum OfflineScoreColorizer {
                 guard !consumed.contains(idx) else { return nil }
                 return r
             }
-            out.append(contentsOf: DuplicateSuppressor.suppress(remaining, spacing: fallbackSpacing))
+            let outsideFiltered = remaining.filter {
+                passesStaffProximity(rect: $0, spacing: fallbackSpacing, systems: systems)
+            }
+            let globallyFiltered = filterNoteheadsGlobalSafetyNet(
+                outsideFiltered,
+                spacing: fallbackSpacing,
+                binaryPage: binaryPage,
+                systems: systems
+            )
+            let artifactFiltered = ArtifactRejector.rejectArtifacts(
+                globallyFiltered,
+                cg: binaryCGImage ?? fallbackCGImage(),
+                spacing: fallbackSpacing,
+                barlines: barlines
+            )
+            let deduped = DuplicateSuppressor.suppress(artifactFiltered, spacing: fallbackSpacing)
+            out.append(contentsOf: deduped)
+            if debugFiltering {
+                print("[filter][outside] remaining=\(remaining.count) global=\(globallyFiltered.count) deduped=\(deduped.count)")
+            }
         }
 
         return out
@@ -540,6 +773,10 @@ enum OfflineScoreColorizer {
 
         let inkExtent = head.inkExtent ?? 0
         let strokeOverlap = head.strokeOverlap ?? (vMask?.overlapRatio(with: rect) ?? 0)
+
+        if head.shapeScore > 0.70 {
+            return false
+        }
 
         var colStem = false
         var lineLike = false
@@ -593,6 +830,49 @@ enum OfflineScoreColorizer {
             let overlapHit = overlapExpanded > RejectTuning.overlapExpandedMin && tailMetrics.fillRatio < 0.20
             if (isLowFill && isAsymmetric) || axisRatioHit || overlapHit {
                 return true
+            }
+        }
+
+        if !strongNotehead, let binaryPage {
+            if shouldRejectAsLongHorizontalStroke(rect, binaryPage: binaryPage, spacing: spacing) {
+                return true
+            }
+        }
+
+        // ------------------------------------------------------------
+        // RULE 0.5) Stroke-through veto (tails/stems/diagonal fragments)
+        // ------------------------------------------------------------
+        if !strongNotehead, let binaryPage {
+            let (bin, pageW, pageH) = binaryPage
+            let expanded = rect.insetBy(dx: -0.10 * u, dy: -0.10 * u).intersection(system.bbox)
+            if expanded.width > 1, expanded.height > 1 {
+                let x0 = max(0, Int(floor(expanded.minX)))
+                let y0 = max(0, Int(floor(expanded.minY)))
+                let x1 = min(pageW, Int(ceil(expanded.maxX)))
+                let y1 = min(pageH, Int(ceil(expanded.maxY)))
+                var maxRun = 0
+                for x in x0..<x1 {
+                    var run = 0
+                    var gap = 0
+                    for y in y0..<y1 {
+                        let isInk = bin[y * pageW + x] != 0
+                        if isInk {
+                            run += 1
+                            gap = 0
+                            maxRun = max(maxRun, run)
+                        } else {
+                            gap += 1
+                            if gap <= 1 {
+                                continue
+                            }
+                            run = 0
+                            gap = 0
+                        }
+                    }
+                }
+                if Double(maxRun) >= 1.15 * Double(spacing) && inkExtent < 0.30 && ecc > 4.8 {
+                    return true
+                }
             }
         }
 
@@ -705,6 +985,72 @@ enum OfflineScoreColorizer {
         return false
     }
 
+    private static func filterNoteheadsGlobalSafetyNet(_ rects: [CGRect],
+                                                       spacing: CGFloat,
+                                                       binaryPage: ([UInt8], Int, Int)?,
+                                                       systems: [SystemBlock]) -> [CGRect] {
+        guard !rects.isEmpty else { return [] }
+
+        return rects.filter { rect in
+            if let binaryPage,
+               shouldRejectAsLongHorizontalStroke(rect, binaryPage: binaryPage, spacing: spacing) {
+                return false
+            }
+
+            let isVeryFlat = (rect.height < spacing * 0.28) && (rect.width > spacing * 1.10)
+            if isVeryFlat {
+                let distance = minDistanceToAnyStaffLine(y: rect.midY, systems: systems)
+                if distance > spacing * 0.65 { return false }
+            }
+            return true
+        }
+    }
+
+    private static func shouldRejectAsLongHorizontalStroke(_ rect: CGRect,
+                                                           binaryPage: ([UInt8], Int, Int),
+                                                           spacing: CGFloat) -> Bool {
+        let (bin, pageW, pageH) = binaryPage
+        let clipped = rect.intersection(CGRect(x: 0, y: 0, width: pageW, height: pageH))
+        guard clipped.width > 1, clipped.height > 1 else { return false }
+
+        let w = clipped.width
+        let h = clipped.height
+        if w < spacing * 1.20 || h > spacing * 0.35 { return false }
+
+        let x0 = max(0, Int(floor(clipped.minX)))
+        let y0 = max(0, Int(floor(clipped.minY)))
+        let x1 = min(pageW, Int(ceil(clipped.maxX)))
+        let y1 = min(pageH, Int(ceil(clipped.maxY)))
+
+        let width = max(1, x1 - x0)
+        let height = max(1, y1 - y0)
+
+        var totalInk = 0
+        var peakRowFrac: Double = 0
+        var thickRows = 0
+
+        for y in y0..<y1 {
+            let row = y * pageW
+            var rowInk = 0
+            for x in x0..<x1 {
+                if bin[row + x] != 0 {
+                    rowInk += 1
+                    totalInk += 1
+                }
+            }
+            let rowFrac = Double(rowInk) / Double(width)
+            peakRowFrac = max(peakRowFrac, rowFrac)
+            if rowFrac > 0.45 { thickRows += 1 }
+        }
+
+        let inkFrac = Double(totalInk) / Double(max(1, width * height))
+        let isRunDominant = peakRowFrac > 0.70
+        let isThinBand = thickRows <= 4
+        let isSparseInk = inkFrac < 0.35
+
+        return isRunDominant && isThinBand && isSparseInk
+    }
+
     private static func computePatchMetrics(rect: CGRect, bin: [UInt8], pageW: Int, pageH: Int) -> PatchMetrics? {
         let clipped = rect.intersection(CGRect(x: 0, y: 0, width: pageW, height: pageH))
         guard clipped.width > 1, clipped.height > 1 else { return nil }
@@ -765,6 +1111,15 @@ enum OfflineScoreColorizer {
         return best
     }
 
+    private static func minDistanceToAnyStaffLine(y: CGFloat, systems: [SystemBlock]) -> CGFloat {
+        guard !systems.isEmpty else { return .greatestFiniteMagnitude }
+        var best = CGFloat.greatestFiniteMagnitude
+        for system in systems {
+            best = min(best, minDistanceToAnyStaffLine(y: y, system: system))
+        }
+        return best
+    }
+
     // MARK: - Consolidation
 
     private static func consolidateByStepAndX(_ heads: [ScoredHead],
@@ -800,10 +1155,79 @@ enum OfflineScoreColorizer {
         return bestByKey.values.map { $0.rect }
     }
 
+    private static func removeDenseRunsScored(_ heads: [ScoredHead],
+                                              spacing: CGFloat,
+                                              minRun: Int = 3) -> [ScoredHead] {
+        guard heads.count >= minRun else { return heads }
+
+        let bucketSize = max(1.0, spacing * 0.50)
+        let maxGap = max(1.0, spacing * 0.45)
+        var buckets: [Int: [(Int, ScoredHead)]] = [:]
+
+        for (idx, head) in heads.enumerated() {
+            let bucket = Int((head.rect.midY / bucketSize).rounded())
+            buckets[bucket, default: []].append((idx, head))
+        }
+
+        var drop = Set<Int>()
+        for (_, entries) in buckets {
+            let sorted = entries.sorted { $0.1.rect.midX < $1.1.rect.midX }
+            var runStart = 0
+            for i in 1...sorted.count {
+                let isEnd = i == sorted.count
+                let prev = sorted[i - 1].1.rect
+                let shouldBreak = isEnd || (sorted[i].1.rect.midX - prev.midX) > maxGap
+                if shouldBreak {
+                    let runEnd = i - 1
+                    let runCount = runEnd - runStart + 1
+                    if runCount >= minRun {
+                        for idx in runStart...runEnd {
+                            drop.insert(sorted[idx].0)
+                        }
+                    }
+                    runStart = i
+                }
+            }
+        }
+
+        guard !drop.isEmpty else { return heads }
+        return heads.enumerated().compactMap { drop.contains($0.offset) ? nil : $0.element }
+    }
+
+    private static func removeDenseRuns(_ rects: [CGRect],
+                                        spacing: CGFloat,
+                                        minRun: Int = 3) -> [CGRect] {
+        guard rects.count >= minRun else { return rects }
+
+        let maxGap = max(1.0, spacing * 0.45)
+        let sorted = rects.sorted { $0.midX < $1.midX }
+        var drop = Set<Int>()
+
+        var runStart = 0
+        for i in 1...sorted.count {
+            let isEnd = i == sorted.count
+            let prev = sorted[i - 1]
+            let shouldBreak = isEnd || (sorted[i].midX - prev.midX) > maxGap
+
+            if shouldBreak {
+                let runEnd = i - 1
+                let runCount = runEnd - runStart + 1
+                if runCount >= minRun {
+                    for idx in runStart...runEnd { drop.insert(idx) }
+                }
+                runStart = i
+            }
+        }
+
+        guard !drop.isEmpty else { return rects }
+        return sorted.enumerated().compactMap { drop.contains($0.offset) ? nil : $0.element }
+    }
+
     // MARK: - Draw overlays
 
     private static func drawOverlays(on image: PlatformImage,
                                      staff: StaffModel?,
+                                     systems: [SystemBlock],
                                      noteheads: [CGRect],
                                      barlines: [CGRect]) -> PlatformImage {
         #if canImport(UIKit)
@@ -836,13 +1260,31 @@ enum OfflineScoreColorizer {
                                                      height: dotR * 2))
             }
 
+            if debugDrawSystems {
+                ctx.cgContext.setLineWidth(max(1.0, baseRadius * 0.10))
+                ctx.cgContext.setStrokeColor(UIColor.systemGreen.withAlphaComponent(0.35).cgColor)
+                for system in systems {
+                    ctx.cgContext.stroke(system.bbox)
+                }
+            }
+
             if !barlines.isEmpty {
                 ctx.cgContext.setLineWidth(max(1.5, baseRadius * 0.12))
                 ctx.cgContext.setStrokeColor(UIColor.systemTeal.withAlphaComponent(0.55).cgColor)
                 for rect in barlines { ctx.cgContext.stroke(rect) }
             }
 
-            if debugStrokeErase, let maskData = debugMaskData,
+            // Debug marker: draw an X at the top-left of the page.
+            let markerSize = max(6.0, baseRadius * 0.35)
+            ctx.cgContext.setStrokeColor(UIColor.systemRed.withAlphaComponent(0.8).cgColor)
+            ctx.cgContext.setLineWidth(max(1.5, baseRadius * 0.18))
+            ctx.cgContext.move(to: CGPoint(x: 4, y: 4))
+            ctx.cgContext.addLine(to: CGPoint(x: 4 + markerSize, y: 4 + markerSize))
+            ctx.cgContext.move(to: CGPoint(x: 4 + markerSize, y: 4))
+            ctx.cgContext.addLine(to: CGPoint(x: 4, y: 4 + markerSize))
+            ctx.cgContext.strokePath()
+
+            if debugDrawMasks, let maskData = debugMaskData,
                let overlay = buildMaskOverlayImage(maskData: maskData, size: image.size) {
                 ctx.cgContext.setAlpha(0.25)
                 ctx.cgContext.draw(overlay, in: CGRect(origin: .zero, size: image.size))
