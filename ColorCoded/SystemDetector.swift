@@ -84,12 +84,8 @@ enum SystemDetector {
                 let top = topLine - spacing * 3.0
                 let bottom = bottomLine + spacing * 3.0
 
-                var y0 = max(0, top)
-                var y1 = min(imageSize.height, bottom)
-                if (y1 - y0) < imageSize.height * 0.55 {
-                    y0 = 0
-                    y1 = imageSize.height
-                }
+                let y0 = max(0, top)
+                let y1 = min(imageSize.height, bottom)
                 let h = max(1, y1 - y0)
                 if h > 1 {
                     let bbox = CGRect(x: 0, y: y0, width: imageSize.width, height: h)
