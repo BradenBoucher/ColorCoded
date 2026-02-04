@@ -401,9 +401,10 @@ enum OfflineScoreColorizer {
             let spacing = max(6.0, system.spacing)
 
             // barline Xs within system (used for penalties + barline veto)
-            let barlineXs = barlines
-                .filter { $0.maxY >= system.bbox.minY && $0.minY <= system.bbox.maxY }
-                .map { $0.midX }
+            let barlinesInSystem = barlines.filter {
+                $0.maxY >= system.bbox.minY && $0.minY <= system.bbox.maxY
+            }
+            let barlineXs = barlinesInSystem.map { $0.midX }
 
             // Symbol zone (clef/key/time region)
             let symbolZone: CGRect = {
@@ -456,8 +457,21 @@ enum OfflineScoreColorizer {
                 !symbolZone.contains(CGPoint(x: r.midX, y: r.midY))
             }
 
+            // Aggressive tail cutoff: drop anything in the trailing margin.
+            // This intentionally sacrifices notes to prevent right-edge artifacts.
+            let tailCutoffX: CGFloat = {
+                if let rightmostBarline = barlinesInSystem.max(by: { $0.maxX < $1.maxX }) {
+                    return min(system.bbox.maxX, rightmostBarline.maxX + spacing * 0.8)
+                }
+                return system.bbox.maxX - spacing * 0.6
+            }()
+
+            let noTail = noSymbols.filter { r in
+                r.midX <= tailCutoffX
+            }
+
             // Staff-step gate
-            let scored0 = noSymbols.map { ScoredHead(rect: $0) }
+            let scored0 = noTail.map { ScoredHead(rect: $0) }
             let gated0 = StaffStepGate.filterCandidates(scored0, system: system)
 
             // ✅ NEW: compute shapeScore BEFORE clustering/suppression so junk loses
@@ -526,8 +540,11 @@ enum OfflineScoreColorizer {
                 binaryPage: binaryPage
             )
 
+            // Aggressive run-kill: drop runs of 5+ tightly packed markers.
+            let noDenseRuns = removeDenseRuns(consolidated, spacing: spacing)
+
             // Final light dedupe
-            let deduped = DuplicateSuppressor.suppress(consolidated, spacing: spacing)
+            let deduped = DuplicateSuppressor.suppress(noDenseRuns, spacing: spacing)
             out.append(contentsOf: deduped)
         }
 
@@ -856,6 +873,41 @@ enum OfflineScoreColorizer {
         }
 
         return bestByKey.values.map { $0.rect }
+    }
+
+    private static func removeDenseRuns(_ rects: [CGRect],
+                                        spacing: CGFloat,
+                                        minRun: Int = 5) -> [CGRect] {
+        guard rects.count >= minRun else { return rects }
+
+        let maxGap = max(1.0, spacing * 0.35)
+        let maxYSpread = spacing * 0.55
+        let sorted = rects.sorted { $0.midX < $1.midX }
+        var drop = Set<Int>()
+
+        var runStart = 0
+        for i in 1...sorted.count {
+            let isEnd = i == sorted.count
+            let prev = sorted[i - 1]
+            let shouldBreak = isEnd || (sorted[i].midX - prev.midX) > maxGap
+
+            if shouldBreak {
+                let runEnd = i - 1
+                let runCount = runEnd - runStart + 1
+                if runCount >= minRun {
+                    let runSlice = sorted[runStart...runEnd]
+                    let minY = runSlice.map(\.midY).min() ?? 0
+                    let maxY = runSlice.map(\.midY).max() ?? 0
+                    if (maxY - minY) <= maxYSpread {
+                        for idx in runStart...runEnd { drop.insert(idx) }
+                    }
+                }
+                runStart = i
+            }
+        }
+
+        guard !drop.isEmpty else { return rects }
+        return sorted.enumerated().compactMap { drop.contains($0.offset) ? nil : $0.element }
     }
 
     // MARK: - Draw overlays
