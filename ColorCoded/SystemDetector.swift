@@ -106,7 +106,7 @@ enum SystemDetector {
 
         // If somehow we built nothing, fall back to per-staff blocks
         if systems.isEmpty {
-            let allLines = sortedStaves.flatMap { $0 }.sorted()
+            let allLines = staves.flatMap { $0 }.sorted()
             if let topLine = allLines.first, let bottomLine = allLines.last {
                 let top = topLine - spacing * 3.0
                 let bottom = bottomLine + spacing * 3.0
@@ -116,8 +116,8 @@ enum SystemDetector {
                 let h = max(1, y1 - y0)
                 if h > 1 {
                     let bbox = CGRect(x: 0, y: y0, width: imageSize.width, height: h)
-                    let trebleLines = sortedStaves.first?.sorted() ?? []
-                    let bassLines = sortedStaves.dropFirst().first?.sorted() ?? []
+                    let trebleLines = staves.first?.sorted() ?? []
+                    let bassLines = staves.dropFirst().first?.sorted() ?? []
                     systems.append(SystemBlock(trebleLines: trebleLines,
                                                bassLines: bassLines,
                                                spacing: spacing,
@@ -125,6 +125,18 @@ enum SystemDetector {
                                                isFallback: true))
                 }
             }
+        }
+
+        if systems.contains(where: { $0.isFallback }) {
+            return [
+                SystemBlock(
+                    trebleLines: [],
+                    bassLines: [],
+                    spacing: spacing,
+                    bbox: CGRect(origin: .zero, size: imageSize),
+                    isFallback: true
+                )
+            ]
         }
 
         // Debug (optional)
@@ -158,6 +170,8 @@ enum SystemDetector {
         guard h > 2 else { return nil }
 
         let bbox = CGRect(x: 0, y: y0, width: imageSize.width, height: h)
+        assert(bbox.minY >= 0)
+        assert(bbox.maxY <= imageSize.height)
 
         return SystemBlock(
             trebleLines: treble,

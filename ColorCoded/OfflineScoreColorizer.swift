@@ -94,6 +94,14 @@ enum OfflineScoreColorizer {
                         // High recall note candidates
                         let detection = await NoteheadDetector.detectDebug(in: cleanedImage ?? image)
 
+                        if debugFiltering {
+                            let insideCount = detection.noteRects.filter { rect in
+                                let center = CGPoint(x: rect.midX, y: rect.midY)
+                                return systems.contains { $0.bbox.contains(center) }
+                            }.count
+                            print("[sanity] insideSystems=\(insideCount) / total=\(detection.noteRects.count)")
+                        }
+
                         // Barlines
                         let barlines = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
 
@@ -194,6 +202,7 @@ enum OfflineScoreColorizer {
                                            staffModel: StaffModel?,
                                            systems: [SystemBlock]) async -> CleanedStrokeResult? {
         guard let cg = baseImage.cgImageSafe else { return nil }
+        let staffCleanedCG = staffModel.flatMap { StaffLineEraser.eraseStaffLines(in: cg, staff: $0) } ?? cg
 
         let spacing = max(6.0, staffModel?.lineSpacing ?? 12.0)
 
@@ -214,17 +223,19 @@ enum OfflineScoreColorizer {
         }
 
         return buildStrokeCleaned(
-            cgImage: cg,
+            cgImage: staffCleanedCG,
             spacing: spacing,
             systems: effectiveSystems,
-            protectRects: rawCandidates
+            protectRects: rawCandidates,
+            skipStrokeErase: true
         )
     }
 
     private static func buildStrokeCleaned(cgImage: CGImage,
                                            spacing: CGFloat,
                                            systems: [SystemBlock],
-                                           protectRects: [CGRect]) -> CleanedStrokeResult? {
+                                           protectRects: [CGRect],
+                                           skipStrokeErase: Bool) -> CleanedStrokeResult? {
 
         let (bin, w, h) = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         var binary = bin
@@ -279,46 +290,48 @@ enum OfflineScoreColorizer {
             markMask(&protectMask, rect: core, width: w, height: h)
         }
 
-        // Erase strokes per system
-        var lastStrokeMask: [UInt8]?
-        for system in systems {
-            let result = VerticalStrokeEraser.eraseStrokes(
-                binary: binary,
-                width: w,
-                height: h,
-                systemRect: system.bbox,
-                spacing: spacing,
-                protectMask: protectMask
-            )
+        if !skipStrokeErase {
+            // Erase strokes per system
+            var lastStrokeMask: [UInt8]?
+            for system in systems {
+                let result = VerticalStrokeEraser.eraseStrokes(
+                    binary: binary,
+                    width: w,
+                    height: h,
+                    systemRect: system.bbox,
+                    spacing: spacing,
+                    protectMask: protectMask
+                )
+
+                if debugStrokeErase {
+                    lastStrokeMask = result.strokeMask
+                    print("StrokeErase system erased=\(result.erasedCount) strokeTotal=\(result.totalStrokeCount)")
+                }
+
+                binary = result.binaryWithoutStrokes
+            }
 
             if debugStrokeErase {
-                lastStrokeMask = result.strokeMask
-                print("StrokeErase system erased=\(result.erasedCount) strokeTotal=\(result.totalStrokeCount)")
-            }
-
-            binary = result.binaryWithoutStrokes
-        }
-
-        if debugStrokeErase {
-            let u = max(7.0, spacing)
-            let sampleStride = max(1, protectRects.count / 30)
-            for (idx, rect) in protectRects.enumerated() where idx % sampleStride == 0 {
-                let core = rect.insetBy(dx: -0.35 * u, dy: -0.35 * u)
-                let fillBefore = rectInkExtent(core, bin: bin, pageW: w, pageH: h)
-                let fillAfter = rectInkExtent(core, bin: binary, pageW: w, pageH: h)
-                if fillBefore > 0.05 && fillAfter < 0.6 * fillBefore {
-                    print("StrokeErase warning: protect rect lost ink before=\(fillBefore) after=\(fillAfter)")
+                let u = max(7.0, spacing)
+                let sampleStride = max(1, protectRects.count / 30)
+                for (idx, rect) in protectRects.enumerated() where idx % sampleStride == 0 {
+                    let core = rect.insetBy(dx: -0.35 * u, dy: -0.35 * u)
+                    let fillBefore = rectInkExtent(core, bin: bin, pageW: w, pageH: h)
+                    let fillAfter = rectInkExtent(core, bin: binary, pageW: w, pageH: h)
+                    if fillBefore > 0.05 && fillAfter < 0.6 * fillBefore {
+                        print("StrokeErase warning: protect rect lost ink before=\(fillBefore) after=\(fillAfter)")
+                    }
                 }
             }
-        }
 
-        if debugStrokeErase, let sm = lastStrokeMask {
-            debugMaskData = DebugMaskData(
-                strokeMask: sm,
-                protectMask: protectMask,
-                width: w,
-                height: h
-            )
+            if debugStrokeErase, let sm = lastStrokeMask {
+                debugMaskData = DebugMaskData(
+                    strokeMask: sm,
+                    protectMask: protectMask,
+                    width: w,
+                    height: h
+                )
+            }
         }
 
         guard let cleanedCG = buildBinaryCGImage(from: binary, width: w, height: h),
@@ -593,10 +606,9 @@ enum OfflineScoreColorizer {
 
             // Staff-step gate
             let scored0 = noTail.map { ScoredHead(rect: $0) }
-            let gated0 = StaffStepGate.filterCandidates(scored0, system: system)
 
-            // ✅ NEW: compute shapeScore BEFORE clustering/suppression so junk loses
-            let gated = gated0.map { head -> ScoredHead in
+            // Temporarily disable StaffStepGate to validate system alignment.
+            let gated = scored0.map { head -> ScoredHead in
                 var h = head
                 guard let binaryPage else { return h }
 
