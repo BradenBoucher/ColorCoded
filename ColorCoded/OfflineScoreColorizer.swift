@@ -12,7 +12,7 @@ import AppKit
 private let DEBUG_OVERLAY = true
 private let debugStrokeErase = true
 private let debugFiltering = true
-private let debugDrawSystems = true
+private let debugDrawSystems = false
 private let debugDrawMasks = false
 
 private struct DebugMaskData {
@@ -647,9 +647,26 @@ enum OfflineScoreColorizer {
                     s *= 0.35
                 }
 
+                if let match = StaffStepGate.bestClefAndStepSoft(
+                    y: h.rect.midY,
+                    trebleLines: system.trebleLines,
+                    bassLines: system.bassLines,
+                    spacing: system.spacing,
+                    maxSteps: 22,
+                    preferBassInGap: true
+                ) {
+                    h.clef = match.clef
+                    h.staffStepIndex = match.snap.stepIndex
+                    h.staffStepError = match.snap.stepError
+                }
+
                 // Clamp
                 h.shapeScore = max(0, min(1, s))
                 return h
+            }
+
+            if debugFiltering {
+                print("[dbg][system \(systemIndex)] preDense input=\(gated.count) spacing=\(spacing) bbox=\(system.bbox)")
             }
 
             // Chord-aware suppression early (now informed by shapeScore)
@@ -668,15 +685,28 @@ enum OfflineScoreColorizer {
             let preDenseRuns = removeDenseRunsScored(pruned, spacing: spacing, minRun: 3)
 
             // ✅ Consolidate (stepIndex + X bin) keeps true head, drops duplicates
-            let consolidated = consolidateByStepAndX(
+            var consolidated = consolidateByStepAndX(
                 preDenseRuns,
                 spacing: spacing,
                 barlineXs: barlineXs,
                 binaryPage: binaryPage
             )
+            if consolidated.isEmpty, !preDenseRuns.isEmpty {
+                consolidated = preDenseRuns.map { $0.rect }
+            }
 
             // Aggressive run-kill: drop runs of 3+ tightly packed markers (unconditional).
-            let noDenseRuns = removeDenseRuns(consolidated, spacing: spacing, minRun: 3)
+            var noDenseRuns = removeDenseRuns(consolidated, spacing: spacing, minRun: 3)
+            if noDenseRuns.isEmpty, !consolidated.isEmpty {
+                noDenseRuns = consolidated
+            }
+
+            let artifactFiltered = ArtifactRejector.rejectArtifacts(
+                noDenseRuns,
+                cg: binaryCGImage ?? fallbackCGImage(),
+                spacing: spacing,
+                barlines: barlinesInSystem
+            )
 
             let artifactFiltered = ArtifactRejector.rejectArtifacts(
                 noDenseRuns,
