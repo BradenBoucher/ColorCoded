@@ -641,6 +641,10 @@ enum OfflineScoreColorizer {
         let inkExtent = head.inkExtent ?? 0
         let strokeOverlap = head.strokeOverlap ?? (vMask?.overlapRatio(with: rect) ?? 0)
 
+        if head.shapeScore > 0.70 {
+            return false
+        }
+
         var colStem = false
         var lineLike = false
         var ecc: Double = 1.0
