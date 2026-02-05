@@ -582,8 +582,8 @@ enum OfflineScoreColorizer {
                 }()
 
                 let ov = vMask?.overlapRatio(with: h.rect) ?? 0
-                let (pca, thickness): (PCALineMetrics, Double) = {
-                    guard let binaryRaw else { return (PCALineMetrics(eccentricity: 1.0, isLineLike: false), 999) }
+                let (pca, thickness): (LineLikenessPCA, Double) = {
+                    guard let binaryRaw else { return (LineLikenessPCA(isLineLike: false, eccentricity: 1.0), 999) }
                     let (rawBin, rawW, rawH) = binaryRaw
                     let pca = lineLikenessPCA(h.rect, bin: rawBin, pageW: rawW, pageH: rawH)
                     let thickness = meanStrokeThickness(h.rect, bin: rawBin, pageW: rawW, pageH: rawH)
