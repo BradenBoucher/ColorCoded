@@ -100,6 +100,7 @@ enum HorizontalStrokeEraser {
             }
         }
 
+        fatalError("🔥 HorizontalStrokeEraser is RUNNING")
         return Result(binaryWithoutHorizontals: out, horizMask: mask, erasedCount: erased)
     }
 }
