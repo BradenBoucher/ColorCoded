@@ -18,8 +18,11 @@ func /-/ (lhs: CGRect, rhs: CGFloat) -> CGRect {
     lhs.insetBy(dx: -rhs, dy: -rhs)
 }
 
-private let debugStrokeErase = true
 private let debugDrawStaffLines = true
+
+private func debugStrokeEraseEnabled() -> Bool {
+    UserDefaults.standard.bool(forKey: "cc_debug_masks")
+}
 
 private struct DebugMaskData {
     let strokeMask: [UInt8]
@@ -58,6 +61,12 @@ enum OfflineScoreColorizer {
         let fillRatio: Double
         let centerRowMaxRunFrac: Double
         let lrAsymmetry: Double
+    }
+
+    private struct RowRunMetrics {
+        let fillRatio: Double
+        let centerRowMaxRunFrac: Double
+        let rowsWithLongRunsFrac: Double
     }
 
     enum ColorizeError: LocalizedError {
@@ -137,6 +146,9 @@ enum OfflineScoreColorizer {
                         let horizArea = cleaned?.horizEraseArea ?? 0
                         let horizEraseFrac = horizArea > 0 ? Double(horizErasedCount) / Double(horizArea) : 0
                         log.notice("metrics systems=\(systems.count, privacy: .public) v=\(vertErasedCount, privacy: .public) h=\(horizErasedCount, privacy: .public) hFrac=\(horizEraseFrac, privacy: .public) candidates=\(detection.noteRects.count, privacy: .public) filtered=\(filtered.count, privacy: .public)")
+                        logDamagedNoteheadsIfNeeded(filtered: filtered,
+                                                    binaryRaw: rawBinary,
+                                                    binaryClean: cleanedBinary)
                         let statusStamp = "sys=\(systems.count) v=\(vertErasedCount) h=\(horizErasedCount) notes=\(filtered.count)"
                         let watermarkText = "PIPELINE: CLEANED=\(cleaned != nil) V=\(vertErasedCount) H=\(horizErasedCount)"
                         let colored = drawOverlays(
@@ -329,7 +341,7 @@ enum OfflineScoreColorizer {
             )
 
             log.notice("VerticalStrokeEraser after roi=\(index, privacy: .public) erasedCount=\(vres.erasedCount, privacy: .public)")
-            if debugStrokeErase {
+            if debugStrokeEraseEnabled() {
                 lastStrokeMask = vres.strokeMask
             }
 
@@ -349,7 +361,7 @@ enum OfflineScoreColorizer {
             )
 
             log.notice("HorizontalStrokeEraser after roi=\(index, privacy: .public) erasedCount=\(hres.erasedCount, privacy: .public)")
-            if debugStrokeErase {
+            if debugStrokeEraseEnabled() {
                 lastHorizMask = hres.horizMask
             }
 
@@ -373,7 +385,7 @@ enum OfflineScoreColorizer {
             )
 
             log.notice("HorizontalStrokeEraser after global erasedCount=\(globalHoriz.erasedCount, privacy: .public)")
-            if debugStrokeErase {
+            if debugStrokeEraseEnabled() {
                 lastHorizMask = globalHoriz.horizMask
             }
 
@@ -382,7 +394,7 @@ enum OfflineScoreColorizer {
             binary = globalHoriz.binaryWithoutHorizontals
         }
 
-        if debugStrokeErase,
+        if debugStrokeEraseEnabled(),
            let sm = lastStrokeMask,
            sm.count == w * h,
            let hm = lastHorizMask,
@@ -394,7 +406,7 @@ enum OfflineScoreColorizer {
                 width: w,
                 height: h
             )
-        } else if !debugStrokeErase {
+        } else if !debugStrokeEraseEnabled() {
             debugMaskData = nil
         }
 
@@ -570,11 +582,11 @@ enum OfflineScoreColorizer {
                 }()
 
                 let ov = vMask?.overlapRatio(with: h.rect) ?? 0
-                let (pca, thickness): (LineLikenessPCA, Double) = {
-                    guard let binaryClean else { return (LineLikenessPCA(isLineLike: false, eccentricity: 1.0), 999) }
-                    let (cleanBin, cleanW, cleanH) = binaryClean
-                    let pca = lineLikenessPCA(h.rect, bin: cleanBin, pageW: cleanW, pageH: cleanH)
-                    let thickness = meanStrokeThickness(h.rect, bin: cleanBin, pageW: cleanW, pageH: cleanH)
+                let (pca, thickness): (PCALineMetrics, Double) = {
+                    guard let binaryRaw else { return (PCALineMetrics(eccentricity: 1.0, isLineLike: false), 999) }
+                    let (rawBin, rawW, rawH) = binaryRaw
+                    let pca = lineLikenessPCA(h.rect, bin: rawBin, pageW: rawW, pageH: rawH)
+                    let thickness = meanStrokeThickness(h.rect, bin: rawBin, pageW: rawW, pageH: rawH)
                     return (pca, thickness)
                 }()
 
@@ -612,6 +624,7 @@ enum OfflineScoreColorizer {
                                          spacing: spacing,
                                          vMask: vMask,
                                          binaryClean: binaryClean,
+                                         binaryRaw: binaryRaw,
                                          barlineXs: barlineXs)
             }
 
@@ -647,6 +660,7 @@ enum OfflineScoreColorizer {
                                                 spacing: CGFloat,
                                                 vMask: VerticalStrokeMask?,
                                                 binaryClean: ([UInt8], Int, Int)?,
+                                                binaryRaw: ([UInt8], Int, Int)?,
                                                 barlineXs: [CGFloat]) -> Bool {
 
         let rect = head.rect
@@ -710,6 +724,19 @@ enum OfflineScoreColorizer {
                 ledgerMetrics.centerRowMaxRunFrac > RejectTuning.staffLineRunFrac &&
                 ledgerMetrics.fillRatio < RejectTuning.staffLineFillMax {
                 return true
+            }
+        }
+
+        if !strongNotehead, let binaryRaw {
+            let (bin, pageW, pageH) = binaryRaw
+            let expanded = rect.insetBy(dx: -0.35 * u, dy: -0.10 * u).intersection(system.bbox)
+            if let runMetrics = computeRowRunMetrics(rect: expanded, bin: bin, pageW: pageW, pageH: pageH) {
+                let heightRatio = rect.height / max(1.0, spacing)
+                if runMetrics.rowsWithLongRunsFrac > 0.35 &&
+                    heightRatio < 0.30 &&
+                    runMetrics.fillRatio < 0.22 {
+                    return true
+                }
             }
         }
 
@@ -911,6 +938,76 @@ enum OfflineScoreColorizer {
         return PatchMetrics(fillRatio: fillRatio, centerRowMaxRunFrac: runFrac, lrAsymmetry: lrAsym)
     }
 
+    private static func computeRowRunMetrics(rect: CGRect, bin: [UInt8], pageW: Int, pageH: Int) -> RowRunMetrics? {
+        let clipped = rect.intersection(CGRect(x: 0, y: 0, width: pageW, height: pageH))
+        guard clipped.width > 1, clipped.height > 1 else { return nil }
+
+        let x0 = max(0, Int(floor(clipped.minX)))
+        let y0 = max(0, Int(floor(clipped.minY)))
+        let x1 = min(pageW, Int(ceil(clipped.maxX)))
+        let y1 = min(pageH, Int(ceil(clipped.maxY)))
+        let w = max(1, x1 - x0)
+        let h = max(1, y1 - y0)
+        let longRunThreshold = Double(w) * 0.70
+
+        var ink = 0
+        var rowsWithLongRuns = 0
+        var maxCenterRun = 0
+        let centerY = y0 + h / 2
+        let rowCandidates = [centerY - 1, centerY, centerY + 1]
+
+        for y in y0..<y1 {
+            let row = y * pageW
+            var run = 0
+            var maxRun = 0
+            let trackCenter = rowCandidates.contains(y)
+            for x in x0..<x1 {
+                if bin[row + x] != 0 {
+                    ink += 1
+                    run += 1
+                    maxRun = max(maxRun, run)
+                } else {
+                    run = 0
+                }
+            }
+            if trackCenter {
+                maxCenterRun = max(maxCenterRun, maxRun)
+            }
+            if Double(maxRun) > longRunThreshold {
+                rowsWithLongRuns += 1
+            }
+        }
+
+        let area = max(1, w * h)
+        let fillRatio = Double(ink) / Double(area)
+        let centerRunFrac = Double(maxCenterRun) / Double(max(1, w))
+        let rowsFrac = Double(rowsWithLongRuns) / Double(max(1, h))
+
+        return RowRunMetrics(fillRatio: fillRatio,
+                             centerRowMaxRunFrac: centerRunFrac,
+                             rowsWithLongRunsFrac: rowsFrac)
+    }
+
+    private static func logDamagedNoteheadsIfNeeded(filtered: [CGRect],
+                                                    binaryRaw: ([UInt8], Int, Int)?,
+                                                    binaryClean: ([UInt8], Int, Int)?) {
+        guard let binaryRaw, let binaryClean else { return }
+        let (rawBin, rawW, rawH) = binaryRaw
+        let (cleanBin, cleanW, cleanH) = binaryClean
+        guard rawW == cleanW, rawH == cleanH else { return }
+
+        var damaged = 0
+        for rect in filtered {
+            let fillRaw = rectInkExtent(rect, bin: rawBin, pageW: rawW, pageH: rawH)
+            let fillClean = rectInkExtent(rect, bin: cleanBin, pageW: cleanW, pageH: cleanH)
+            if fillRaw > 0.0 && fillClean < 0.6 * fillRaw {
+                damaged += 1
+            }
+        }
+
+        log.warning("notehead health check damagedHeads=\(damaged, privacy: .public)")
+    }
+
     private static func minDistanceToAnyStaffLine(y: CGFloat, system: SystemBlock) -> CGFloat {
         let all = system.trebleLines + system.bassLines
         guard !all.isEmpty else { return .greatestFiniteMagnitude }
@@ -1034,7 +1131,7 @@ enum OfflineScoreColorizer {
                 drawStatusStamp(text: statusStamp, in: ctx.cgContext)
             }
 
-            if debugStrokeErase, let maskData = debugMaskData,
+            if debugStrokeEraseEnabled(), let maskData = debugMaskData,
                let overlay = buildMaskOverlayImage(maskData: maskData, size: image.size) {
                 let debugOverlayAlpha: CGFloat = 0.08
                 let drawSize: CGSize
