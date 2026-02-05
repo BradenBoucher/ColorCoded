@@ -486,7 +486,7 @@ enum OfflineScoreColorizer {
                 )
 
             log.notice("VerticalStrokeEraser after roi=\(index, privacy: .public) erasedCount=\(vres.erasedCount, privacy: .public)")
-            log.notice("VerticalStrokeEraser timing roi=\(index, privacy: .public) area=\(qroi.roiW * qroi.roiH, privacy: .public) passMs=\(vres.pass1Ms, privacy: .public) protectDilateMs=\(protectDilateMs, privacy: .public)")
+            log.notice("VerticalStrokeEraser timing roi=\(index, privacy: .public) area=\(qroi.roiW * qroi.roiH, privacy: .public) passMs=\(vres.pass1Ms, privacy: .public) protectFillMs=\(protectRectFillMs, privacy: .public)")
 
             if debugMasksEnabled() {
                 if debugStrokeMaskFull?.count != w * h {
