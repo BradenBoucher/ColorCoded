@@ -356,9 +356,6 @@ enum OfflineScoreColorizer {
         }
 
         let protectDilateR = max(1, Int((0.20 * u).rounded()))
-        if protectDilateR > 0 {
-            protectMask = dilateMask(protectMask, width: w, height: h, radius: protectDilateR)
-        }
 
         let fullPageRect = CGRect(x: 0, y: 0, width: w, height: h)
         let rois: [CGRect] = systems.isEmpty ? [fullPageRect] : systems.map(\.bbox)
@@ -369,29 +366,66 @@ enum OfflineScoreColorizer {
             : systems.map { $0.trebleLines + $0.bassLines }
 
         // Erase strokes per system/ROI
-        var lastStrokeMask: [UInt8]?
+        var verticalScratch = VerticalStrokeEraser.Scratch()
+        var debugStrokeMaskFull: [UInt8]?
         var lastHorizMask: [UInt8]?
         var totalHorizErased = 0
         var totalVertErased = 0
         var totalHorizArea = 0
 
         for (index, roi) in rois.enumerated() {
+            guard let qroi = VerticalStrokeEraser.quantize(systemRect: roi, width: w, height: h) else { continue }
             let staffLines = staffLinesByROI[index]
             log.notice("VerticalStrokeEraser before roi=\(index, privacy: .public)")
+            verticalScratch.ensureUInt8(&verticalScratch.protectROI, count: qroi.roiW * qroi.roiH)
+            verticalScratch.ensureUInt8(&verticalScratch.protectExpandedROI, count: qroi.roiW * qroi.roiH)
+            verticalScratch.ensureUInt8(&verticalScratch.temp, count: qroi.roiW * qroi.roiH)
+            verticalScratch.ensureUInt8(&verticalScratch.out, count: qroi.roiW * qroi.roiH)
+
+            for y in qroi.y0...qroi.y1 {
+                let srcRow = y * w
+                let dstRow = (y - qroi.y0) * qroi.roiW
+                for x in qroi.x0...qroi.x1 {
+                    verticalScratch.protectROI[dstRow + (x - qroi.x0)] = protectMask[srcRow + x]
+                }
+            }
+
+            var protectDilateMs = 0.0
+            if protectDilateR > 0 {
+                let protectStart = CFAbsoluteTimeGetCurrent()
+                VerticalStrokeEraser.boxDilateROI(maskROI: &verticalScratch.protectROI,
+                                                  tempROI: &verticalScratch.temp,
+                                                  outROI: &verticalScratch.protectExpandedROI,
+                                                  roiW: qroi.roiW,
+                                                  roiH: qroi.roiH,
+                                                  radiusX: protectDilateR,
+                                                  radiusY: protectDilateR)
+                protectDilateMs = (CFAbsoluteTimeGetCurrent() - protectStart) * 1000
+            }
+
             let vres = verticalEraseEnabled()
                 ? VerticalStrokeEraser.eraseStrokes(
                     binary: binary,
                     width: w,
                     height: h,
-                    systemRect: roi,
+                    roi: qroi,
                     spacing: spacing,
-                    protectMask: protectMask
+                    protectExpandedROI: verticalScratch.protectROI,
+                    scratch: &verticalScratch
                 )
                 : VerticalStrokeEraser.Result(
                     binaryWithoutStrokes: binary,
-                    strokeMask: [UInt8](repeating: 0, count: w * h),
+                    strokeMaskROI: [],
+                    roiX: qroi.x0,
+                    roiY: qroi.y0,
+                    roiW: qroi.roiW,
+                    roiH: qroi.roiH,
                     erasedCount: 0,
-                    totalStrokeCount: 0
+                    totalStrokeCount: 0,
+                    pass1Ms: 0,
+                    pass2Ms: 0,
+                    strokeDilateMs: 0,
+                    eraseLoopMs: 0
                 )
 
             log.notice("VerticalStrokeEraser after roi=\(index, privacy: .public) erasedCount=\(vres.erasedCount, privacy: .public)")
@@ -530,30 +564,6 @@ enum OfflineScoreColorizer {
         #else
         return nil
         #endif
-    }
-
-    private static func dilateMask(_ mask: [UInt8],
-                                   width: Int,
-                                   height: Int,
-                                   radius: Int) -> [UInt8] {
-        guard radius > 0 else { return mask }
-        var out = mask
-        for y in 0..<height {
-            for x in 0..<width {
-                if mask[y * width + x] == 0 { continue }
-                let x0 = max(0, x - radius)
-                let x1 = min(width - 1, x + radius)
-                let y0 = max(0, y - radius)
-                let y1 = min(height - 1, y + radius)
-                for yy in y0...y1 {
-                    let row = yy * width
-                    for xx in x0...x1 {
-                        out[row + xx] = 1
-                    }
-                }
-            }
-        }
-        return out
     }
 
     // ------------------------------------------------------------------
