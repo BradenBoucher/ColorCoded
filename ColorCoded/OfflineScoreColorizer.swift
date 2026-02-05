@@ -3,6 +3,9 @@ import PDFKit
 @preconcurrency import Vision
 import CoreGraphics
 import os
+#if canImport(Accelerate)
+import Accelerate
+#endif
 
 #if canImport(UIKit)
 import UIKit
@@ -120,7 +123,7 @@ enum OfflineScoreColorizer {
                     }
 
                     let renderStart = CFAbsoluteTimeGetCurrent()
-                    guard let image = render(page: page, scale: 2.0) else {
+                    guard let image = render(page: page, scale: 1.6) else {
                         continuation.resume(throwing: ColorizeError.cannotRenderPage)
                         return
                     }
@@ -1588,32 +1591,67 @@ enum OfflineScoreColorizer {
         let w = cg.width
         let h = cg.height
 
-        var rgba = [UInt8](repeating: 0, count: w * h * 4)
-        let cs = CGColorSpaceCreateDeviceRGB()
-        let bpr = w * 4
+        let tGrayAlloc = CFAbsoluteTimeGetCurrent()
+        var gray = [UInt8](repeating: 0, count: w * h)
+        let grayAllocMs = (CFAbsoluteTimeGetCurrent() - tGrayAlloc) * 1000.0
+        log.notice("PERF binaryGrayAllocMs=\(String(format: \"%.1f\", grayAllocMs), privacy: .public)")
 
-        let ctx = CGContext(
-            data: &rgba,
-            width: w,
-            height: h,
-            bitsPerComponent: 8,
-            bytesPerRow: bpr,
-            space: cs,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        )!
+        let tRender = CFAbsoluteTimeGetCurrent()
+        gray.withUnsafeMutableBytes { buf in
+            guard let base = buf.baseAddress else { return }
+            let cs = CGColorSpaceCreateDeviceGray()
+            guard let ctx = CGContext(
+                data: base,
+                width: w,
+                height: h,
+                bitsPerComponent: 8,
+                bytesPerRow: w,
+                space: cs,
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return }
+            ctx.interpolationQuality = .none
+            ctx.setBlendMode(.copy)
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        }
+        let grayRenderMs = (CFAbsoluteTimeGetCurrent() - tRender) * 1000.0
+        log.notice("PERF binaryGrayRenderMs=\(String(format: \"%.1f\", grayRenderMs), privacy: .public)")
 
-        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-
+        let tThreshold = CFAbsoluteTimeGetCurrent()
         var bin = [UInt8](repeating: 0, count: w * h)
-        for y in 0..<h {
-            let row = y * w
-            let rowRGBA = y * bpr
-            for x in 0..<w {
-                let i = rowRGBA + x * 4
-                let lum = (Int(rgba[i]) + Int(rgba[i + 1]) + Int(rgba[i + 2])) / 3
-                bin[row + x] = (lum < lumThreshold) ? 1 : 0
+        #if canImport(Accelerate)
+        gray.withUnsafeBytes { srcBytes in
+            bin.withUnsafeMutableBytes { dstBytes in
+                guard let srcBase = srcBytes.baseAddress,
+                      let dstBase = dstBytes.baseAddress else { return }
+                var src = vImage_Buffer(
+                    data: UnsafeMutableRawPointer(mutating: srcBase),
+                    height: vImagePixelCount(h),
+                    width: vImagePixelCount(w),
+                    rowBytes: w
+                )
+                var dst = vImage_Buffer(
+                    data: dstBase,
+                    height: vImagePixelCount(h),
+                    width: vImagePixelCount(w),
+                    rowBytes: w
+                )
+                vImageThreshold_Planar8(
+                    &src,
+                    &dst,
+                    UInt8(lumThreshold),
+                    1,
+                    0,
+                    vImage_Flags(kvImageNoFlags)
+                )
             }
         }
+        #else
+        for i in 0..<bin.count {
+            bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
+        }
+        #endif
+        let thresholdMs = (CFAbsoluteTimeGetCurrent() - tThreshold) * 1000.0
+        log.notice("PERF binaryThresholdMs=\(String(format: \"%.1f\", thresholdMs), privacy: .public)")
         return (bin, w, h)
     }
 
