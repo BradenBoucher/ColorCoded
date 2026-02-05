@@ -83,6 +83,10 @@ enum OfflineScoreColorizer {
         let rowsWithLongRunsFrac: Double
     }
 
+    private struct NoteDetectionDebug {
+        let noteRects: [CGRect]
+    }
+
     enum ColorizeError: LocalizedError {
         case cannotOpenPDF
         case cannotRenderPage
@@ -121,23 +125,31 @@ enum OfflineScoreColorizer {
                         return
                     }
                     let renderMs = (CFAbsoluteTimeGetCurrent() - renderStart) * 1000.0
+                    log.notice("PERF renderMs=\(String(format: "%.1f", renderMs), privacy: .public)")
 
                     Task {
                         let pageStart = CFAbsoluteTimeGetCurrent()
                         let staffStart = CFAbsoluteTimeGetCurrent()
                         let staffModel = await StaffDetector.detectStaff(in: image)
                         let staffMs = (CFAbsoluteTimeGetCurrent() - staffStart) * 1000.0
+                        log.notice("PERF staffMs=\(String(format: "%.1f", staffMs), privacy: .public)")
                         logStaffDiagnostics(staffModel)
                         let systemsStart = CFAbsoluteTimeGetCurrent()
                         let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
                         let systemsMs = (CFAbsoluteTimeGetCurrent() - systemsStart) * 1000.0
+
+                        let protectStart = CFAbsoluteTimeGetCurrent()
+                        let noteRects = await NoteheadDetector.detectNoteheads(in: image)
+                        let protectDetectMs = (CFAbsoluteTimeGetCurrent() - protectStart) * 1000.0
+                        log.notice("PERF protectDetectMs=\(String(format: "%.1f", protectDetectMs), privacy: .public)")
 
                         // Build stroke-cleaned image AND keep the cleaned binary.
                         debugMaskData = nil
                         let strokeStart = CFAbsoluteTimeGetCurrent()
                         let cleaned = await buildStrokeCleaned(baseImage: image,
                                                               staffModel: staffModel,
-                                                              systems: systems)
+                                                              systems: systems,
+                                                              protectRects: noteRects)
                         let strokeMs = (CFAbsoluteTimeGetCurrent() - strokeStart) * 1000.0
                         if cleaned == nil {
                             debugMaskData = nil
@@ -147,10 +159,10 @@ enum OfflineScoreColorizer {
                         let rawBinary = cleaned?.binaryRaw
                         log.notice("systems.count=\(systems.count, privacy: .public) cleaned!=nil=\(cleaned != nil, privacy: .public) override!=nil=\(cleanedBinary != nil, privacy: .public)")
 
-                        // High recall note candidates (debug flavor returns boxes + maybe extra info)
-                        let noteStart = CFAbsoluteTimeGetCurrent()
-                        let detection = await NoteheadDetector.detectDebug(in: image)
-                        let noteMs = (CFAbsoluteTimeGetCurrent() - noteStart) * 1000.0
+                        // High recall note candidates
+                        let detection = NoteDetectionDebug(noteRects: noteRects)
+                        let debugDetectMs = 0.0
+                        log.notice("PERF debugDetectMs=\(String(format: "%.1f", debugDetectMs), privacy: .public)")
 
                         // Barlines
                         let barlineStart = CFAbsoluteTimeGetCurrent()
@@ -163,6 +175,7 @@ enum OfflineScoreColorizer {
                                                         systems: systems,
                                                         spacing: staffModel?.lineSpacing ?? 12.0)
                         let barlineMs = (CFAbsoluteTimeGetCurrent() - barlineStart) * 1000.0
+                        log.notice("PERF barMs=\(String(format: "%.1f", barlineMs), privacy: .public)")
 
                         // Use raw binary for shape metrics, cleaned binary for line/stem rejection.
                         let filterStart = CFAbsoluteTimeGetCurrent()
@@ -176,6 +189,7 @@ enum OfflineScoreColorizer {
                             binaryCleanOverride: cleanedBinary
                         )
                         let filterMs = (CFAbsoluteTimeGetCurrent() - filterStart) * 1000.0
+                        log.notice("PERF filterMs=\(String(format: "%.1f", filterMs), privacy: .public)")
 
                         let horizErasedCount = cleaned?.horizErasedCount ?? -1
                         let vertErasedCount = cleaned?.vertErasedCount ?? -1
@@ -198,14 +212,16 @@ enum OfflineScoreColorizer {
                             statusStamp: statusStamp
                         )
                         let drawMs = (CFAbsoluteTimeGetCurrent() - drawStart) * 1000.0
+                        log.notice("PERF drawMs=\(String(format: "%.1f", drawMs), privacy: .public)")
 
                         let pdfStart = CFAbsoluteTimeGetCurrent()
                         if let pdfPage = PDFPage(image: colored) {
                             outDoc.insert(pdfPage, at: outDoc.pageCount)
                         }
                         let pdfMs = (CFAbsoluteTimeGetCurrent() - pdfStart) * 1000.0
+                        log.notice("PERF pdfMs=\(String(format: "%.1f", pdfMs), privacy: .public)")
                         let pageMs = (CFAbsoluteTimeGetCurrent() - pageStart) * 1000.0
-                        log.notice("TIMING page=\(pageIndex + 1, privacy: .public) render=\(String(format: "%.1f", renderMs), privacy: .public)ms staff=\(String(format: "%.1f", staffMs), privacy: .public)ms systems=\(String(format: "%.1f", systemsMs), privacy: .public)ms stroke=\(String(format: "%.1f", strokeMs), privacy: .public)ms note=\(String(format: "%.1f", noteMs), privacy: .public)ms bar=\(String(format: "%.1f", barlineMs), privacy: .public)ms filter=\(String(format: "%.1f", filterMs), privacy: .public)ms draw=\(String(format: "%.1f", drawMs), privacy: .public)ms pdf=\(String(format: "%.1f", pdfMs), privacy: .public)ms total=\(String(format: "%.1f", pageMs), privacy: .public)ms")
+                        log.notice("TIMING page=\(pageIndex + 1, privacy: .public) render=\(String(format: "%.1f", renderMs), privacy: .public)ms staff=\(String(format: "%.1f", staffMs), privacy: .public)ms systems=\(String(format: "%.1f", systemsMs), privacy: .public)ms stroke=\(String(format: "%.1f", strokeMs), privacy: .public)ms note=\(String(format: "%.1f", protectDetectMs), privacy: .public)ms bar=\(String(format: "%.1f", barlineMs), privacy: .public)ms filter=\(String(format: "%.1f", filterMs), privacy: .public)ms draw=\(String(format: "%.1f", drawMs), privacy: .public)ms pdf=\(String(format: "%.1f", pdfMs), privacy: .public)ms total=\(String(format: "%.1f", pageMs), privacy: .public)ms")
                         debugMaskData = nil
                         continuation.resume(returning: ())
                     }
@@ -284,19 +300,17 @@ enum OfflineScoreColorizer {
 
     private static func buildStrokeCleaned(baseImage: PlatformImage,
                                            staffModel: StaffModel?,
-                                           systems: [SystemBlock]) async -> CleanedStrokeResult? {
+                                           systems: [SystemBlock],
+                                           protectRects: [CGRect]) async -> CleanedStrokeResult? {
         guard let cg = baseImage.cgImageSafe else { return nil }
 
         let spacing = max(6.0, staffModel?.lineSpacing ?? 12.0)
-
-        // Raw candidates (high recall) => used only for protect mask
-        let rawCandidates = await NoteheadDetector.detectNoteheads(in: baseImage)
 
         return buildStrokeCleaned(
             cgImage: cg,
             spacing: spacing,
             systems: systems,
-            protectRects: rawCandidates
+            protectRects: protectRects
         )
     }
 
@@ -306,7 +320,10 @@ enum OfflineScoreColorizer {
                                            protectRects: [CGRect]) -> CleanedStrokeResult? {
         log.notice("enter buildStrokeCleaned(cgImage:)")
 
+        let binaryStart = CFAbsoluteTimeGetCurrent()
         let (bin, w, h) = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
+        let binaryMs = (CFAbsoluteTimeGetCurrent() - binaryStart) * 1000.0
+        log.notice("PERF binaryMs=\(String(format: "%.1f", binaryMs), privacy: .public)")
         let binaryRaw = (bin, w, h)
         var binary = bin
 
