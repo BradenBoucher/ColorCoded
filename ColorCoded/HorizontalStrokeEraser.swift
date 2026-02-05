@@ -70,11 +70,9 @@ enum HorizontalStrokeEraser {
 
         if !foundRun {
             log.notice("eraseHorizontalRuns skipped roi=\(String(describing: roi), privacy: .public)")
-            return Result(binaryWithoutHorizontals: binary, horizMask: [], erasedCount: 0)
+            return Result(binaryWithoutHorizontals: binary, horizMask: [UInt8](repeating: 0, count: width * height), erasedCount: 0)
         }
 
-        var out = binary
-        var mask = [UInt8](repeating: 0, count: width * height)
         var erased = 0
 
         @inline(__always)
