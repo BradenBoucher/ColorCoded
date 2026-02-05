@@ -101,6 +101,7 @@ enum HorizontalStrokeEraser {
             }
         }
 
+        print("✅ HorizontalStrokeEraser RUNNING — erasedPixels=\(erased)")
         return Result(binaryWithoutHorizontals: out, horizMask: mask, erasedCount: erased)
     }
 }
