@@ -46,6 +46,36 @@ enum HorizontalStrokeEraser {
         let x1 = min(width, Int(ceil(clipped.maxX)))
         let y1 = min(height, Int(ceil(clipped.maxY)))
 
+        let sampleStep = 4
+        let gateThreshold = minRun
+        var foundRun = false
+
+        if (x1 - x0) > 0 && (y1 - y0) > 0 {
+            var y = y0
+            while y < y1 && !foundRun {
+                var x = x0
+                var run = 0
+                while x < x1 {
+                    if binary[y * width + x] != 0 {
+                        run += sampleStep
+                        if run >= gateThreshold {
+                            foundRun = true
+                            break
+                        }
+                    } else {
+                        run = 0
+                    }
+                    x += sampleStep
+                }
+                y += sampleStep
+            }
+        }
+
+        if !foundRun {
+            log.notice("eraseHorizontalRuns skipped roi=\(String(describing: roi), privacy: .public)")
+            return Result(binaryWithoutHorizontals: binary, horizMask: [UInt8](repeating: 0, count: width * height), erasedCount: 0)
+        }
+
         var erased = 0
 
         @inline(__always)
