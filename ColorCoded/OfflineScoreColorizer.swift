@@ -1618,13 +1618,14 @@ enum OfflineScoreColorizer {
 
         let tThreshold = CFAbsoluteTimeGetCurrent()
         var bin = [UInt8](repeating: 0, count: w * h)
+        var needsFallback = true
         #if canImport(Accelerate)
-        gray.withUnsafeMutableBytes { grayBuf in
+        gray.withUnsafeBytes { grayBuf in
             bin.withUnsafeMutableBytes { binBuf in
                 guard let grayBase = grayBuf.baseAddress,
                       let binBase = binBuf.baseAddress else { return }
                 var src = vImage_Buffer(
-                    data: grayBase,
+                    data: UnsafeMutableRawPointer(mutating: grayBase),
                     height: vImagePixelCount(h),
                     width: vImagePixelCount(w),
                     rowBytes: w
@@ -1636,28 +1637,25 @@ enum OfflineScoreColorizer {
                     rowBytes: w
                 )
                 let thresh = Pixel_8(clamping: lumThreshold)
-                let maxVal: Pixel_8 = 1
-                let minVal: Pixel_8 = 0
-                let err = vImageThreshold_Planar8(
+                var table = [UInt8](repeating: 0, count: 256)
+                for i in 0..<256 {
+                    table[i] = i < Int(thresh) ? 1 : 0
+                }
+                let err = vImageTableLookUp_Planar8(
                     &src,
                     &dst,
-                    thresh,
-                    maxVal,
-                    minVal,
+                    table,
                     vImage_Flags(kvImageNoFlags)
                 )
-                if err != kvImageNoError {
-                    for i in 0..<bin.count {
-                        bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
-                    }
-                }
+                needsFallback = err != kvImageNoError
             }
         }
-        #else
-        for i in 0..<bin.count {
-            bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
-        }
         #endif
+        if needsFallback {
+            for i in 0..<bin.count {
+                bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
+            }
+        }
         let thresholdMs = (CFAbsoluteTimeGetCurrent() - tThreshold) * 1000.0
         log.notice("PERF binaryThresholdMs=\(String(format: "%.1f", thresholdMs), privacy: .public)")
         return (bin, w, h)
