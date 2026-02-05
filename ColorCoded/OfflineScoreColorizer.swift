@@ -1619,7 +1619,7 @@ enum OfflineScoreColorizer {
         let tThreshold = CFAbsoluteTimeGetCurrent()
         var bin = [UInt8](repeating: 0, count: w * h)
         #if canImport(Accelerate)
-        gray.withUnsafeMutableBytes { grayBuf in
+        gray.withUnsafeBytes { grayBuf in
             bin.withUnsafeMutableBytes { binBuf in
                 guard let grayBase = grayBuf.baseAddress,
                       let binBase = binBuf.baseAddress else { return }
