@@ -1618,6 +1618,7 @@ enum OfflineScoreColorizer {
 
         let tThreshold = CFAbsoluteTimeGetCurrent()
         var bin = [UInt8](repeating: 0, count: w * h)
+        var needsFallback = true
         #if canImport(Accelerate)
         gray.withUnsafeBytes { grayBuf in
             bin.withUnsafeMutableBytes { binBuf in
@@ -1654,11 +1655,12 @@ enum OfflineScoreColorizer {
                 bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
             }
         }
-        #else
-        for i in 0..<bin.count {
-            bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
-        }
         #endif
+        if needsFallback {
+            for i in 0..<bin.count {
+                bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
+            }
+        }
         let thresholdMs = (CFAbsoluteTimeGetCurrent() - tThreshold) * 1000.0
         log.notice("PERF binaryThresholdMs=\(String(format: "%.1f", thresholdMs), privacy: .public)")
         return (bin, w, h)
