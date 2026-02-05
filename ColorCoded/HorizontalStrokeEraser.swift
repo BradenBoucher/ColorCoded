@@ -18,6 +18,7 @@ enum HorizontalStrokeEraser {
         spacing: CGFloat,
         protectMask: [UInt8]
     ) -> Result {
+        fatalError("🔥 HorizontalStrokeEraser HIT")
 
         var out = binary
         var mask = [UInt8](repeating: 0, count: width * height)
