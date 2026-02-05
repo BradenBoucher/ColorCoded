@@ -219,7 +219,9 @@ enum OfflineScoreColorizer {
                                            spacing: CGFloat,
                                            systems: [SystemBlock],
                                            protectRects: [CGRect]) -> CleanedStrokeResult? {
-
+        _ = HorizontalStrokeEraser.self
+        fatalError("🔥 buildStrokeCleaned(cgImage:) HIT")
+        print("✅ buildStrokeCleaned entered")
         let (bin, w, h) = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         var binary = bin
 
@@ -295,6 +297,7 @@ enum OfflineScoreColorizer {
             binary = vres.binaryWithoutStrokes
 
             // NEW: horizontal eraser (beams/ties/ledger leftovers)
+            print("✅ about to call HorizontalStrokeEraser")
             let hres = HorizontalStrokeEraser.eraseHorizontalRuns(
                 binary: binary,
                 width: w,
