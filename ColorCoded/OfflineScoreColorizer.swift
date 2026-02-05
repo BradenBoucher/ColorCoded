@@ -14,6 +14,7 @@ private let debugStrokeErase = true
 private struct DebugMaskData {
     let strokeMask: [UInt8]
     let protectMask: [UInt8]
+    let horizMask: [UInt8]
     let width: Int
     let height: Int
 }
@@ -25,6 +26,11 @@ enum OfflineScoreColorizer {
     private enum RejectTuning {
         static let ledgerRunFrac: Double = 0.70
         static let ledgerFillMax: Double = 0.12
+        static let staffLineRunFrac: Double = 0.62
+        static let staffLineFillMax: Double = 0.20
+        static let staffLineNearFrac: Double = 0.22
+        static let staffLineFlatMax: Double = 0.24
+        static let staffLineWideMin: Double = 0.85
         static let tailFillMax: Double = 0.10
         static let tailAsymMin: Double = 0.55
         static let axisRatioMin: Double = 3.2
@@ -247,6 +253,7 @@ enum OfflineScoreColorizer {
 
         // Erase strokes per system
         var lastStrokeMask: [UInt8]?
+        var lastHorizMask: [UInt8]?
         for system in systems {
             let result = VerticalStrokeEraser.eraseStrokes(
                 binary: binary,
@@ -263,6 +270,22 @@ enum OfflineScoreColorizer {
             }
 
             binary = result.binaryWithoutStrokes
+
+            let hres = HorizontalStrokeEraser.eraseHorizontalRuns(
+                binary: binary,
+                width: w,
+                height: h,
+                roi: system.bbox,
+                spacing: spacing,
+                protectMask: protectMask
+            )
+
+            if debugStrokeErase {
+                lastHorizMask = hres.horizMask
+                print("HorizErase system erased=\(hres.erasedCount)")
+            }
+
+            binary = hres.binaryWithoutHorizontals
         }
 
         if debugStrokeErase {
@@ -282,6 +305,7 @@ enum OfflineScoreColorizer {
             debugMaskData = DebugMaskData(
                 strokeMask: sm,
                 protectMask: protectMask,
+                horizMask: lastHorizMask ?? [UInt8](repeating: 0, count: w * h),
                 width: w,
                 height: h
             )
@@ -596,6 +620,16 @@ enum OfflineScoreColorizer {
         if let ledgerMetrics, !strongNotehead {
             if ledgerMetrics.centerRowMaxRunFrac > RejectTuning.ledgerRunFrac,
                ledgerMetrics.fillRatio < RejectTuning.ledgerFillMax {
+                return true
+            }
+
+            let distToStaff = minDistanceToAnyStaffLine(y: rect.midY, system: system)
+            let nearStaff = distToStaff < spacing * RejectTuning.staffLineNearFrac
+            let flat = h < spacing * RejectTuning.staffLineFlatMax
+            let wide = w > spacing * RejectTuning.staffLineWideMin
+            if nearStaff && flat && wide &&
+                ledgerMetrics.centerRowMaxRunFrac > RejectTuning.staffLineRunFrac &&
+                ledgerMetrics.fillRatio < RejectTuning.staffLineFillMax {
                 return true
             }
         }
@@ -914,7 +948,9 @@ enum OfflineScoreColorizer {
     private static func buildMaskOverlayImage(maskData: DebugMaskData, size: CGSize) -> CGImage? {
         let w = maskData.width
         let h = maskData.height
-        guard maskData.strokeMask.count == w * h, maskData.protectMask.count == w * h else { return nil }
+        guard maskData.strokeMask.count == w * h,
+              maskData.protectMask.count == w * h,
+              maskData.horizMask.count == w * h else { return nil }
         var rgba = [UInt8](repeating: 0, count: w * h * 4)
         for y in 0..<h {
             let row = y * w
@@ -925,6 +961,10 @@ enum OfflineScoreColorizer {
                 if maskData.strokeMask[idx] != 0 {
                     rgba[rgbaIdx] = 255
                     rgba[rgbaIdx + 3] = 120
+                }
+                if maskData.horizMask[idx] != 0 {
+                    rgba[rgbaIdx + 2] = 255
+                    rgba[rgbaIdx + 3] = max(rgba[rgbaIdx + 3], 120)
                 }
                 if maskData.protectMask[idx] != 0 {
                     rgba[rgbaIdx + 1] = 255
