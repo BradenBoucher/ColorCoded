@@ -9,6 +9,14 @@ import UIKit
 import AppKit
 #endif
 
+// Convenience operator for expanding a CGRect by a uniform amount
+infix operator /-/: AdditionPrecedence
+
+@inline(__always)
+func /-/ (lhs: CGRect, rhs: CGFloat) -> CGRect {
+    lhs.insetBy(dx: -rhs, dy: -rhs)
+}
+
 private let debugStrokeErase = true
 
 private struct DebugMaskData {
@@ -23,14 +31,20 @@ private var debugMaskData: DebugMaskData?
 
 enum OfflineScoreColorizer {
 
+    // ------------------------------------------------------------------
+    // TUNING
+    // ------------------------------------------------------------------
+
     private enum RejectTuning {
         static let ledgerRunFrac: Double = 0.70
         static let ledgerFillMax: Double = 0.12
+
         static let staffLineRunFrac: Double = 0.62
         static let staffLineFillMax: Double = 0.20
         static let staffLineNearFrac: Double = 0.22
         static let staffLineFlatMax: Double = 0.24
         static let staffLineWideMin: Double = 0.85
+
         static let tailFillMax: Double = 0.10
         static let tailAsymMin: Double = 0.55
         static let axisRatioMin: Double = 3.2
@@ -56,6 +70,10 @@ enum OfflineScoreColorizer {
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // MAIN
+    // ------------------------------------------------------------------
 
     static func colorizePDF(inputURL: URL) async throws -> URL {
         guard let doc = PDFDocument(url: inputURL) else { throw ColorizeError.cannotOpenPDF }
@@ -87,13 +105,13 @@ enum OfflineScoreColorizer {
                         let cleanedImage = cleaned?.image
                         let cleanedBinary = cleaned?.binaryPage
 
-                        // High recall note candidates
+                        // High recall note candidates (debug flavor returns boxes + maybe extra info)
                         let detection = await NoteheadDetector.detectDebug(in: cleanedImage ?? image)
 
                         // Barlines
                         let barlines = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
 
-                        // IMPORTANT: use cleanedBinary directly.
+                        // IMPORTANT: use cleanedBinary directly so filtering sees the stroke-erased image.
                         let filtered = filterNoteheadsHighRecall(
                             detection.noteRects,
                             systems: systems,
@@ -126,7 +144,9 @@ enum OfflineScoreColorizer {
         return outURL
     }
 
-    // MARK: - Render PDF page
+    // ------------------------------------------------------------------
+    // RENDER
+    // ------------------------------------------------------------------
 
     private static func render(page: PDFPage, scale: CGFloat) -> PlatformImage? {
         #if canImport(UIKit)
@@ -168,7 +188,9 @@ enum OfflineScoreColorizer {
         #endif
     }
 
-    // MARK: - Stroke erasing (pre-contour cleanup)
+    // ------------------------------------------------------------------
+    // STROKE CLEANING PIPELINE (VERTICAL + HORIZONTAL)
+    // ------------------------------------------------------------------
 
     private struct CleanedStrokeResult {
         let image: PlatformImage
@@ -182,7 +204,7 @@ enum OfflineScoreColorizer {
 
         let spacing = max(6.0, staffModel?.lineSpacing ?? 12.0)
 
-        // Raw candidates (high recall)
+        // Raw candidates (high recall) => used only for protect mask
         let rawCandidates = await NoteheadDetector.detectNoteheads(in: baseImage)
 
         return buildStrokeCleaned(
@@ -233,7 +255,7 @@ enum OfflineScoreColorizer {
             let fill = rectInkExtent(rect, bin: binary, pageW: w, pageH: h)
             if fill < 0.10 { continue }
 
-            let expanded = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u)
+            let expanded = rect /-/ (0.20 * u)
             let expandedFill = rectInkExtent(expanded, bin: binary, pageW: w, pageH: h)
             let expandedPCA = lineLikenessPCA(expanded, bin: binary, pageW: w, pageH: h)
             let isBlobLike = expandedFill >= 0.22 &&
@@ -254,8 +276,9 @@ enum OfflineScoreColorizer {
         // Erase strokes per system
         var lastStrokeMask: [UInt8]?
         var lastHorizMask: [UInt8]?
+
         for system in systems {
-            let result = VerticalStrokeEraser.eraseStrokes(
+            let vres = VerticalStrokeEraser.eraseStrokes(
                 binary: binary,
                 width: w,
                 height: h,
@@ -265,12 +288,13 @@ enum OfflineScoreColorizer {
             )
 
             if debugStrokeErase {
-                lastStrokeMask = result.strokeMask
-                print("StrokeErase system erased=\(result.erasedCount) strokeTotal=\(result.totalStrokeCount)")
+                lastStrokeMask = vres.strokeMask
+                print("StrokeErase system erased=\(vres.erasedCount) strokeTotal=\(vres.totalStrokeCount)")
             }
 
-            binary = result.binaryWithoutStrokes
+            binary = vres.binaryWithoutStrokes
 
+            // NEW: horizontal eraser (beams/ties/ledger leftovers)
             let hres = HorizontalStrokeEraser.eraseHorizontalRuns(
                 binary: binary,
                 width: w,
@@ -288,6 +312,7 @@ enum OfflineScoreColorizer {
             binary = hres.binaryWithoutHorizontals
         }
 
+        // Extra global pass (catches lines outside system bbox)
         let globalHoriz = HorizontalStrokeEraser.eraseHorizontalRuns(
             binary: binary,
             width: w,
@@ -303,19 +328,6 @@ enum OfflineScoreColorizer {
         }
 
         binary = globalHoriz.binaryWithoutHorizontals
-
-        if debugStrokeErase {
-            let u = max(7.0, spacing)
-            let sampleStride = max(1, protectRects.count / 30)
-            for (idx, rect) in protectRects.enumerated() where idx % sampleStride == 0 {
-                let core = rect.insetBy(dx: -0.10 * u, dy: -0.10 * u)
-                let fillBefore = rectInkExtent(core, bin: bin, pageW: w, pageH: h)
-                let fillAfter = rectInkExtent(core, bin: binary, pageW: w, pageH: h)
-                if fillBefore > 0.05 && fillAfter < 0.6 * fillBefore {
-                    print("StrokeErase warning: protect rect lost ink before=\(fillBefore) after=\(fillAfter)")
-                }
-            }
-        }
 
         if debugStrokeErase, let sm = lastStrokeMask {
             debugMaskData = DebugMaskData(
@@ -389,31 +401,8 @@ enum OfflineScoreColorizer {
     }
 
     // ------------------------------------------------------------------
-    // Everything BELOW here: keep your existing functions exactly as-is.
-    // You already pasted them and they compile. No changes required there:
-    //
-    // - filterNoteheadsHighRecall(...)
-    // - shouldRejectAsStemOrLine(...)
-    // - computePatchMetrics(...)
-    // - minDistanceToAnyStaffLine(...)
-    // - consolidateByStepAndX(...)
-    // - drawOverlays(...)
-    // - buildMaskOverlayImage(...)
-    // - buildBinaryInkMap(...)
-    // - rectInkExtent(...)
-    // - isStemLikeByColumnDominance(...)
-    // - lineLikenessPCA(...)
-    // - meanStrokeThickness(...)
+    // FILTERING PIPELINE (YOUR HIGH RECALL FILTER)
     // ------------------------------------------------------------------
-
-    // ✅ KEEP: filterNoteheadsHighRecall, shouldRejectAsStemOrLine, etc.
-    // (paste your existing implementations below this point unchanged)
-
-    // MARK: - Filtering (high recall, targeted noise suppression)
-    // ... (paste your existing code unchanged below)
-
-
-    // MARK: - Filtering (high recall, targeted noise suppression)
 
     private static func filterNoteheadsHighRecall(_ noteheads: [CGRect],
                                                   systems: [SystemBlock],
@@ -467,7 +456,7 @@ enum OfflineScoreColorizer {
                     zone.size.width = max(zone.width, clampedX - bbox.minX)
                 }
 
-                // widen zone a bit to eat left-side clutter
+                // Widen zone a bit to eat left-side clutter
                 zone.size.width = min(bbox.width * 0.45, zone.width + spacing * 2.5)
 
                 return zone
@@ -477,8 +466,6 @@ enum OfflineScoreColorizer {
             let vMask: VerticalStrokeMask? = {
                 guard let binaryPage else { return nil }
                 let (bin, w, h) = binaryPage
-
-                // More sensitive than before (helps stem fragments)
                 let minRun = max(3, Int((spacing * 0.80).rounded()))
                 return VerticalStrokeMask.build(from: bin, width: w, height: h, roi: system.bbox, minRun: minRun)
             }()
@@ -500,7 +487,7 @@ enum OfflineScoreColorizer {
             let scored0 = noSymbols.map { ScoredHead(rect: $0) }
             let gated0 = StaffStepGate.filterCandidates(scored0, system: system)
 
-            // ✅ NEW: compute shapeScore BEFORE clustering/suppression so junk loses
+            // Compute shapeScore BEFORE clustering/suppression so junk loses
             let gated = gated0.map { head -> ScoredHead in
                 var h = head
                 guard let binaryPage else { return h }
@@ -517,10 +504,6 @@ enum OfflineScoreColorizer {
                 h.strokeOverlap = ov
 
                 // Shape score: 0..1
-                // - Prefer mid fill (noteheads are not empty, not fully solid)
-                // - Penalize vertical stroke overlap
-                // - Penalize column-stem dominance
-                // - Penalize being a thin line (slurs/ties/tails)
                 let fillTarget: CGFloat = 0.48
                 let fillScore = 1.0 - min(1.0, abs(ext - fillTarget) / 0.40)
 
@@ -529,9 +512,6 @@ enum OfflineScoreColorizer {
                 s += 0.25 * (1.0 - min(1.0, ov / 0.35))
                 s += 0.20 * (colStem ? 0.0 : 1.0)
 
-                // Line-like penalty (diagonal/curved tails)
-                // pca.eccentricity ~ 1 (blob) to large (line)
-                // thickness low means stroke-like
                 let ecc = pca.eccentricity
                 let thin = thickness < max(1.0, spacing * 0.10)
                 if ecc > 6.0 && thin {
@@ -540,15 +520,14 @@ enum OfflineScoreColorizer {
                     s *= 0.35
                 }
 
-                // Clamp
                 h.shapeScore = max(0, min(1, s))
                 return h
             }
 
-            // Chord-aware suppression early (now informed by shapeScore)
+            // Chord-aware suppression early (informed by shapeScore)
             let clustered = ClusterSuppressor.suppress(gated, spacing: spacing)
 
-            // ✅ Targeted pruning: remove stems/tails/slurs/flat junk
+            // Targeted pruning: remove stems/tails/slurs/flat junk
             let pruned = clustered.filter { head in
                 !shouldRejectAsStemOrLine(head,
                                          system: system,
@@ -558,7 +537,7 @@ enum OfflineScoreColorizer {
                                          barlineXs: barlineXs)
             }
 
-            // ✅ Consolidate (stepIndex + X bin) keeps true head, drops duplicates
+            // Consolidate (stepIndex + X bin) keeps true head, drops duplicates
             let consolidated = consolidateByStepAndX(
                 pruned,
                 spacing: spacing,
@@ -583,15 +562,17 @@ enum OfflineScoreColorizer {
         return out
     }
 
-    // MARK: - Stem/tail + hanging-line rejection
+    // ------------------------------------------------------------------
+    // REJECTION RULES (STEMS / TAILS / LINES)
+    // ------------------------------------------------------------------
 
-    /// NOTE: now takes ScoredHead so we can use shapeScore + strokeOverlap consistently.
     private static func shouldRejectAsStemOrLine(_ head: ScoredHead,
                                                 system: SystemBlock,
                                                 spacing: CGFloat,
                                                 vMask: VerticalStrokeMask?,
                                                 binaryPage: ([UInt8], Int, Int)?,
                                                 barlineXs: [CGFloat]) -> Bool {
+
         let rect = head.rect
         let w = rect.width
         let h = rect.height
@@ -623,9 +604,9 @@ enum OfflineScoreColorizer {
         } ?? 0
 
         // If something is very notehead-like, be reluctant to reject it.
-        // (This protects recall.)
         let strongNotehead = head.shapeScore > 0.72 && strokeOverlap < 0.18 && !colStem
 
+        // Ledger / staff-line metrics
         let ledgerMetrics: PatchMetrics? = {
             guard let binaryPage else { return nil }
             let (bin, pageW, pageH) = binaryPage
@@ -650,6 +631,7 @@ enum OfflineScoreColorizer {
             }
         }
 
+        // Tail-ish metrics
         let tailMetrics: PatchMetrics? = {
             guard let binaryPage else { return nil }
             let (bin, pageW, pageH) = binaryPage
@@ -667,9 +649,7 @@ enum OfflineScoreColorizer {
             }
         }
 
-        // ------------------------------------------------------------
-        // RULE 0.5) Stroke-through veto (tails/stems/diagonal fragments)
-        // ------------------------------------------------------------
+        // Stroke-through veto (diagonal fragments)
         if !strongNotehead, let binaryPage {
             let (bin, pageW, pageH) = binaryPage
             let expanded = rect.insetBy(dx: -0.10 * u, dy: -0.10 * u).intersection(system.bbox)
@@ -678,6 +658,7 @@ enum OfflineScoreColorizer {
                 let y0 = max(0, Int(floor(expanded.minY)))
                 let x1 = min(pageW, Int(ceil(expanded.maxX)))
                 let y1 = min(pageH, Int(ceil(expanded.maxY)))
+
                 var maxRun = 0
                 for x in x0..<x1 {
                     var run = 0
@@ -690,80 +671,65 @@ enum OfflineScoreColorizer {
                             maxRun = max(maxRun, run)
                         } else {
                             gap += 1
-                            if gap <= 1 {
-                                continue
-                            }
+                            if gap <= 1 { continue }
                             run = 0
                             gap = 0
                         }
                     }
                 }
+
                 if Double(maxRun) >= 1.15 * Double(spacing) && inkExtent < 0.30 && ecc > 4.8 {
                     return true
                 }
             }
         }
 
-        // ------------------------------------------------------------
-        // RULE 0) Barline neighborhood veto (kills barline spam)
-        // ------------------------------------------------------------
+        // Barline neighborhood veto
         if !strongNotehead, !barlineXs.isEmpty {
             let cx = rect.midX
             let nearBarline = barlineXs.contains { abs($0 - cx) < spacing * 0.22 }
             if nearBarline {
                 let smallish = max(w, h) < spacing * 0.65
                 if smallish && (strokeOverlap > 0.04 || colStem || lineLike) { return true }
+
                 let tallish = h > spacing * 0.60
                 if tallish && strokeOverlap > 0.06 { return true }
+
                 if colStem { return true }
             }
         }
 
-        // ------------------------------------------------------------
-        // RULE 1) Staccato dots (tiny + high fill)
-        // ------------------------------------------------------------
+        // Staccato dots (tiny + high fill)
         if !strongNotehead {
             let tiny = (w < spacing * 0.30) && (h < spacing * 0.30)
             if tiny && inkExtent > 0.55 { return true }
         }
 
-        // ------------------------------------------------------------
-        // RULE 2) Hanging flat fragments away from staff neighborhoods
-        // ------------------------------------------------------------
+        // Hanging flat fragments away from staff neighborhoods
         if !strongNotehead {
             let isVeryFlat = (h < spacing * 0.28) && (w > spacing * 1.10)
             if isVeryFlat {
-                let centerY = rect.midY
-                let d = minDistanceToAnyStaffLine(y: centerY, system: system)
+                let d = minDistanceToAnyStaffLine(y: rect.midY, system: system)
                 if d > spacing * 0.55 { return true }
             }
         }
 
-        // ------------------------------------------------------------
-        // RULE 3) Tie/slur-ish: thin + long + line-like (NEW: catches tails)
-        // ------------------------------------------------------------
+        // Tie/slur-ish: thin + long + line-like
         if !strongNotehead {
             let longish = max(w, h) > spacing * 0.85
             let thinish = min(w, h) < spacing * 0.28
             let lowFill = inkExtent < 0.28
-
-            // thickness in pixels (stroke)
             let thinStroke = thickness < Double(max(1.0, spacing * 0.10))
 
-            // line-like includes diagonal/curved strokes; eccentricity catches it too
             if longish && thinish && lowFill && (lineLike || (ecc > 5.5 && thinStroke)) {
                 return true
             }
-
-            // Also reject very line-like even if fill is moderate (anti-aliasing can inflate fill)
             if longish && (lineLike && ecc > 6.5) && thinStroke {
                 return true
             }
         }
 
-        // ------------------------------------------------------------
-        // RULE 4) Stem/tail kill switch (vertical ladders)
-        // ------------------------------------------------------------
+        // Stem/tail kill switch
         if !strongNotehead {
             if colStem {
                 if h > spacing * 0.26 { return true }
@@ -789,9 +755,7 @@ enum OfflineScoreColorizer {
             }
         }
 
-        // ------------------------------------------------------------
-        // RULE 6) Mid-gap vertical artifacts (between treble/bass)
-        // ------------------------------------------------------------
+        // Mid-gap vertical artifacts (between treble/bass)
         if !strongNotehead {
             let trebleBottom = system.trebleLines.sorted().last ?? 0
             let bassTop = system.bassLines.sorted().first ?? 0
@@ -803,15 +767,17 @@ enum OfflineScoreColorizer {
             }
         }
 
-        // ------------------------------------------------------------
-        // RULE 5) Almost empty contour artifacts
-        // ------------------------------------------------------------
+        // Almost empty contour artifacts
         if !strongNotehead, inkExtent < 0.08 {
             return true
         }
 
         return false
     }
+
+    // ------------------------------------------------------------------
+    // PATCH METRICS
+    // ------------------------------------------------------------------
 
     private static func computePatchMetrics(rect: CGRect, bin: [UInt8], pageW: Int, pageH: Int) -> PatchMetrics? {
         let clipped = rect.intersection(CGRect(x: 0, y: 0, width: pageW, height: pageH))
@@ -873,7 +839,9 @@ enum OfflineScoreColorizer {
         return best
     }
 
-    // MARK: - Consolidation
+    // ------------------------------------------------------------------
+    // CONSOLIDATION
+    // ------------------------------------------------------------------
 
     private static func consolidateByStepAndX(_ heads: [ScoredHead],
                                               spacing: CGFloat,
@@ -887,7 +855,6 @@ enum OfflineScoreColorizer {
         bestByKey.reserveCapacity(heads.count)
 
         func compositeScore(_ h: ScoredHead) -> Double {
-            // Use the true compositeScore now that shapeScore is computed
             return Double(h.compositeScore)
         }
 
@@ -908,7 +875,9 @@ enum OfflineScoreColorizer {
         return bestByKey.values.map { $0.rect }
     }
 
-    // MARK: - Draw overlays
+    // ------------------------------------------------------------------
+    // DRAWING / DEBUG OVERLAY
+    // ------------------------------------------------------------------
 
     private static func drawOverlays(on image: PlatformImage,
                                      staff: StaffModel?,
@@ -967,6 +936,7 @@ enum OfflineScoreColorizer {
         guard maskData.strokeMask.count == w * h,
               maskData.protectMask.count == w * h,
               maskData.horizMask.count == w * h else { return nil }
+
         var rgba = [UInt8](repeating: 0, count: w * h * 4)
         for y in 0..<h {
             let row = y * w
@@ -974,20 +944,25 @@ enum OfflineScoreColorizer {
             for x in 0..<w {
                 let idx = row + x
                 let rgbaIdx = rowRGBA + x * 4
+
+                // Red: vertical stroke mask (stems)
                 if maskData.strokeMask[idx] != 0 {
                     rgba[rgbaIdx] = 255
                     rgba[rgbaIdx + 3] = 120
                 }
+                // Blue: horizontal erased
                 if maskData.horizMask[idx] != 0 {
                     rgba[rgbaIdx + 2] = 255
                     rgba[rgbaIdx + 3] = max(rgba[rgbaIdx + 3], 120)
                 }
+                // Green: protect mask
                 if maskData.protectMask[idx] != 0 {
                     rgba[rgbaIdx + 1] = 255
                     rgba[rgbaIdx + 3] = max(rgba[rgbaIdx + 3], 120)
                 }
             }
         }
+
         let cs = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(
             data: &rgba,
@@ -1001,7 +976,9 @@ enum OfflineScoreColorizer {
         return ctx.makeImage()
     }
 
-    // MARK: - Binary helpers
+    // ------------------------------------------------------------------
+    // BINARY HELPERS
+    // ------------------------------------------------------------------
 
     private static func buildBinaryInkMap(from cg: CGImage, lumThreshold: Int) -> ([UInt8], Int, Int) {
         let w = cg.width
@@ -1056,7 +1033,9 @@ enum OfflineScoreColorizer {
         return CGFloat(ink) / CGFloat(area)
     }
 
-    // MARK: - Stem detector via column dominance
+    // ------------------------------------------------------------------
+    // STEM DETECTOR VIA COLUMN DOMINANCE
+    // ------------------------------------------------------------------
 
     private static func isStemLikeByColumnDominance(_ rect: CGRect,
                                                     bin: [UInt8],
@@ -1097,10 +1076,12 @@ enum OfflineScoreColorizer {
         return fracTop2 > 0.66
     }
 
-    // MARK: - NEW: Line-likeness via PCA (catches slurs/ties/tails)
+    // ------------------------------------------------------------------
+    // LINE-LIKENESS VIA PCA
+    // ------------------------------------------------------------------
 
     private struct PCALineMetrics {
-        let eccentricity: Double   // major/minor axis ratio
+        let eccentricity: Double
         let isLineLike: Bool
     }
 
@@ -1125,7 +1106,7 @@ enum OfflineScoreColorizer {
         ptsY.reserveCapacity(256)
 
         var count = 0
-        let step = max(1, Int(max(clipped.width, clipped.height) / 28.0)) // subsample
+        let step = max(1, Int(max(clipped.width, clipped.height) / 28.0))
         for y in stride(from: y0, to: y1, by: step) {
             let row = y * pageW
             for x in stride(from: x0, to: x1, by: step) {
@@ -1143,11 +1124,9 @@ enum OfflineScoreColorizer {
             return PCALineMetrics(eccentricity: 1.0, isLineLike: false)
         }
 
-        // mean
         let mx = ptsX.reduce(0, +) / Double(ptsX.count)
         let my = ptsY.reduce(0, +) / Double(ptsY.count)
 
-        // covariance
         var sxx = 0.0, syy = 0.0, sxy = 0.0
         for i in 0..<ptsX.count {
             let dx = ptsX[i] - mx
@@ -1160,7 +1139,6 @@ enum OfflineScoreColorizer {
         syy /= Double(ptsX.count)
         sxy /= Double(ptsX.count)
 
-        // eigenvalues of 2x2 covariance
         let tr = sxx + syy
         let det = sxx * syy - sxy * sxy
         let disc = max(0.0, tr * tr - 4.0 * det)
@@ -1170,19 +1148,15 @@ enum OfflineScoreColorizer {
         let l2 = max(1e-9, 0.5 * (tr - root))
 
         let ecc = sqrt(l1 / l2)
-
-        // Line-like if very eccentric AND not a tiny blob
         let isLine = ecc > 5.0
 
         return PCALineMetrics(eccentricity: ecc, isLineLike: isLine)
     }
 
-    // MARK: - NEW: Thickness estimate (helps reject slurs/tails)
+    // ------------------------------------------------------------------
+    // THICKNESS ESTIMATE
+    // ------------------------------------------------------------------
 
-    /// Approx average stroke thickness inside rect:
-    /// - count ink pixels
-    /// - estimate stroke "length" as max(w,h) projection
-    /// Returns pixels (approx).
     private static func meanStrokeThickness(_ rect: CGRect,
                                             bin: [UInt8],
                                             pageW: Int,

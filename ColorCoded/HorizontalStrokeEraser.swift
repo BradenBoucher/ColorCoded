@@ -41,12 +41,9 @@ enum HorizontalStrokeEraser {
 
         var erased = 0
 
-        // Helper: approximate thickness by counting how many neighbor rows also have ink at x
         @inline(__always)
         func columnThicknessAt(x: Int, y: Int) -> Int {
             var t = 0
-            // check a small vertical band around y
-            // (keeps this fast and catches beams/ties thickness)
             for dy in -maxThickness...maxThickness {
                 let yy = y + dy
                 if yy < 0 || yy >= height { continue }
@@ -75,7 +72,6 @@ enum HorizontalStrokeEraser {
                 var inkSamples = 0
                 var maxT = 0
 
-                // sample every 2 px for speed
                 var sx = runStart
                 while sx < runEnd {
                     inkSamples += 1
@@ -88,7 +84,6 @@ enum HorizontalStrokeEraser {
 
                 // Erase if thin and not protected
                 if protectFrac <= protectMaxFrac && maxT <= (2 * maxThickness + 1) {
-                    // erase a small vertical band (so we delete the full thickness)
                     let band = max(1, maxThickness)
                     for yy in max(0, y - band)...min(height - 1, y + band) {
                         let row = yy * width
