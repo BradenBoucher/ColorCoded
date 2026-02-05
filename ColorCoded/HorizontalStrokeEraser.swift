@@ -34,6 +34,8 @@ enum HorizontalStrokeEraser {
         let staffExclusion = spacing * 0.18
 
         let clipped = roi.intersection(CGRect(x: 0, y: 0, width: width, height: height))
+        var out = binary
+        var mask = [UInt8](repeating: 0, count: width * height)
         guard clipped.width > 2, clipped.height > 2 else {
             return Result(binaryWithoutHorizontals: binary, horizMask: [], erasedCount: 0)
         }
