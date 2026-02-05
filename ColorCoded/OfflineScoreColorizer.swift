@@ -18,14 +18,16 @@ func /-/ (lhs: CGRect, rhs: CGFloat) -> CGRect {
     lhs.insetBy(dx: -rhs, dy: -rhs)
 }
 
-private let debugDrawStaffLines = true
+private func debugDrawStaffLinesEnabled() -> Bool {
+    debugMasksEnabled()
+}
 
-private func debugStrokeEraseEnabled() -> Bool {
+private func debugMasksEnabled() -> Bool {
     UserDefaults.standard.bool(forKey: "cc_debug_masks")
 }
 
 private func debugDrawBarlinesEnabled() -> Bool {
-    UserDefaults.standard.bool(forKey: "cc_debug_barlines") || debugStrokeEraseEnabled()
+    debugMasksEnabled()
 }
 
 private func verticalEraseEnabled() -> Bool {
@@ -113,21 +115,30 @@ enum OfflineScoreColorizer {
                         return
                     }
 
+                    let renderStart = CFAbsoluteTimeGetCurrent()
                     guard let image = render(page: page, scale: 2.0) else {
                         continuation.resume(throwing: ColorizeError.cannotRenderPage)
                         return
                     }
+                    let renderMs = (CFAbsoluteTimeGetCurrent() - renderStart) * 1000.0
 
                     Task {
+                        let pageStart = CFAbsoluteTimeGetCurrent()
+                        let staffStart = CFAbsoluteTimeGetCurrent()
                         let staffModel = await StaffDetector.detectStaff(in: image)
+                        let staffMs = (CFAbsoluteTimeGetCurrent() - staffStart) * 1000.0
                         logStaffDiagnostics(staffModel)
+                        let systemsStart = CFAbsoluteTimeGetCurrent()
                         let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
+                        let systemsMs = (CFAbsoluteTimeGetCurrent() - systemsStart) * 1000.0
 
                         // Build stroke-cleaned image AND keep the cleaned binary.
                         debugMaskData = nil
+                        let strokeStart = CFAbsoluteTimeGetCurrent()
                         let cleaned = await buildStrokeCleaned(baseImage: image,
                                                               staffModel: staffModel,
                                                               systems: systems)
+                        let strokeMs = (CFAbsoluteTimeGetCurrent() - strokeStart) * 1000.0
                         if cleaned == nil {
                             debugMaskData = nil
                         }
@@ -137,16 +148,24 @@ enum OfflineScoreColorizer {
                         log.notice("systems.count=\(systems.count, privacy: .public) cleaned!=nil=\(cleaned != nil, privacy: .public) override!=nil=\(cleanedBinary != nil, privacy: .public)")
 
                         // High recall note candidates (debug flavor returns boxes + maybe extra info)
+                        let noteStart = CFAbsoluteTimeGetCurrent()
                         let detection = await NoteheadDetector.detectDebug(in: image)
+                        let noteMs = (CFAbsoluteTimeGetCurrent() - noteStart) * 1000.0
 
                         // Barlines
+                        let barlineStart = CFAbsoluteTimeGetCurrent()
                         let barlinesRaw = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
-                        let barlines = filterConfidentBarlines(barlinesRaw,
-                                                               systems: systems,
-                                                               spacing: staffModel?.lineSpacing ?? 12.0,
-                                                               binaryRaw: rawBinary)
+                        let barlinesFiltered = filterConfidentBarlines(barlinesRaw,
+                                                                       systems: systems,
+                                                                       spacing: staffModel?.lineSpacing ?? 12.0,
+                                                                       binaryRaw: rawBinary)
+                        let barlines = sanitizeBarlines(barlinesFiltered,
+                                                        systems: systems,
+                                                        spacing: staffModel?.lineSpacing ?? 12.0)
+                        let barlineMs = (CFAbsoluteTimeGetCurrent() - barlineStart) * 1000.0
 
                         // Use raw binary for shape metrics, cleaned binary for line/stem rejection.
+                        let filterStart = CFAbsoluteTimeGetCurrent()
                         let filtered = filterNoteheadsHighRecall(
                             detection.noteRects,
                             systems: systems,
@@ -156,6 +175,7 @@ enum OfflineScoreColorizer {
                             binaryRawOverride: rawBinary,
                             binaryCleanOverride: cleanedBinary
                         )
+                        let filterMs = (CFAbsoluteTimeGetCurrent() - filterStart) * 1000.0
 
                         let horizErasedCount = cleaned?.horizErasedCount ?? -1
                         let vertErasedCount = cleaned?.vertErasedCount ?? -1
@@ -167,6 +187,7 @@ enum OfflineScoreColorizer {
                                                     binaryClean: cleanedBinary)
                         let statusStamp = "sys=\(systems.count) v=\(vertErasedCount) h=\(horizErasedCount) notes=\(filtered.count)"
                         let watermarkText = "PIPELINE: CLEANED=\(cleaned != nil) V=\(vertErasedCount) H=\(horizErasedCount)"
+                        let drawStart = CFAbsoluteTimeGetCurrent()
                         let colored = drawOverlays(
                             on: image,
                             staff: staffModel,
@@ -176,10 +197,15 @@ enum OfflineScoreColorizer {
                             pipelineWatermark: watermarkText,
                             statusStamp: statusStamp
                         )
+                        let drawMs = (CFAbsoluteTimeGetCurrent() - drawStart) * 1000.0
 
+                        let pdfStart = CFAbsoluteTimeGetCurrent()
                         if let pdfPage = PDFPage(image: colored) {
                             outDoc.insert(pdfPage, at: outDoc.pageCount)
                         }
+                        let pdfMs = (CFAbsoluteTimeGetCurrent() - pdfStart) * 1000.0
+                        let pageMs = (CFAbsoluteTimeGetCurrent() - pageStart) * 1000.0
+                        log.notice("TIMING page=\(pageIndex + 1, privacy: .public) render=\(String(format: "%.1f", renderMs), privacy: .public)ms staff=\(String(format: "%.1f", staffMs), privacy: .public)ms systems=\(String(format: "%.1f", systemsMs), privacy: .public)ms stroke=\(String(format: "%.1f", strokeMs), privacy: .public)ms note=\(String(format: "%.1f", noteMs), privacy: .public)ms bar=\(String(format: "%.1f", barlineMs), privacy: .public)ms filter=\(String(format: "%.1f", filterMs), privacy: .public)ms draw=\(String(format: "%.1f", drawMs), privacy: .public)ms pdf=\(String(format: "%.1f", pdfMs), privacy: .public)ms total=\(String(format: "%.1f", pageMs), privacy: .public)ms")
                         debugMaskData = nil
                         continuation.resume(returning: ())
                     }
@@ -330,9 +356,6 @@ enum OfflineScoreColorizer {
         }
 
         let protectDilateR = max(1, Int((0.20 * u).rounded()))
-        if protectDilateR > 0 {
-            protectMask = dilateMask(protectMask, width: w, height: h, radius: protectDilateR)
-        }
 
         let fullPageRect = CGRect(x: 0, y: 0, width: w, height: h)
         let rois: [CGRect] = systems.isEmpty ? [fullPageRect] : systems.map(\.bbox)
@@ -343,34 +366,87 @@ enum OfflineScoreColorizer {
             : systems.map { $0.trebleLines + $0.bassLines }
 
         // Erase strokes per system/ROI
-        var lastStrokeMask: [UInt8]?
+        var verticalScratch = VerticalStrokeEraser.Scratch()
+        var debugStrokeMaskFull: [UInt8]?
         var lastHorizMask: [UInt8]?
         var totalHorizErased = 0
         var totalVertErased = 0
         var totalHorizArea = 0
 
         for (index, roi) in rois.enumerated() {
+            guard let qroi = VerticalStrokeEraser.quantize(systemRect: roi, width: w, height: h) else { continue }
             let staffLines = staffLinesByROI[index]
             log.notice("VerticalStrokeEraser before roi=\(index, privacy: .public)")
+            verticalScratch.ensureUInt8(&verticalScratch.protectROI, count: qroi.roiW * qroi.roiH)
+            verticalScratch.ensureUInt8(&verticalScratch.protectExpandedROI, count: qroi.roiW * qroi.roiH)
+            verticalScratch.ensureUInt8(&verticalScratch.temp, count: qroi.roiW * qroi.roiH)
+            verticalScratch.ensureUInt8(&verticalScratch.out, count: qroi.roiW * qroi.roiH)
+
+            for y in qroi.y0...qroi.y1 {
+                let srcRow = y * w
+                let dstRow = (y - qroi.y0) * qroi.roiW
+                for x in qroi.x0...qroi.x1 {
+                    verticalScratch.protectROI[dstRow + (x - qroi.x0)] = protectMask[srcRow + x]
+                }
+            }
+
+            var protectDilateMs = 0.0
+            if protectDilateR > 0 {
+                let protectStart = CFAbsoluteTimeGetCurrent()
+                VerticalStrokeEraser.boxDilateROI(maskROI: &verticalScratch.protectROI,
+                                                  tempROI: &verticalScratch.temp,
+                                                  outROI: &verticalScratch.protectExpandedROI,
+                                                  roiW: qroi.roiW,
+                                                  roiH: qroi.roiH,
+                                                  radiusX: protectDilateR,
+                                                  radiusY: protectDilateR)
+                protectDilateMs = (CFAbsoluteTimeGetCurrent() - protectStart) * 1000
+            }
+
             let vres = verticalEraseEnabled()
                 ? VerticalStrokeEraser.eraseStrokes(
                     binary: binary,
                     width: w,
                     height: h,
-                    systemRect: roi,
+                    roi: qroi,
                     spacing: spacing,
-                    protectMask: protectMask
+                    protectExpandedROI: verticalScratch.protectROI,
+                    scratch: &verticalScratch
                 )
                 : VerticalStrokeEraser.Result(
                     binaryWithoutStrokes: binary,
-                    strokeMask: [UInt8](repeating: 0, count: w * h),
+                    strokeMaskROI: [],
+                    roiX: qroi.x0,
+                    roiY: qroi.y0,
+                    roiW: qroi.roiW,
+                    roiH: qroi.roiH,
                     erasedCount: 0,
-                    totalStrokeCount: 0
+                    totalStrokeCount: 0,
+                    pass1Ms: 0,
+                    pass2Ms: 0,
+                    strokeDilateMs: 0,
+                    eraseLoopMs: 0
                 )
 
             log.notice("VerticalStrokeEraser after roi=\(index, privacy: .public) erasedCount=\(vres.erasedCount, privacy: .public)")
-            if debugStrokeEraseEnabled() {
-                lastStrokeMask = vres.strokeMask
+            log.notice("VerticalStrokeEraser timing roi=\(index, privacy: .public) area=\(qroi.roiW * qroi.roiH, privacy: .public) pass1=\(vres.pass1Ms, privacy: .public)ms pass2=\(vres.pass2Ms, privacy: .public)ms strokeDilate=\(vres.strokeDilateMs, privacy: .public)ms protectDilate=\(protectDilateMs, privacy: .public)ms erase=\(vres.eraseLoopMs, privacy: .public)ms")
+            if debugMasksEnabled() {
+                if debugStrokeMaskFull == nil {
+                    debugStrokeMaskFull = [UInt8](repeating: 0, count: w * h)
+                }
+                if vres.strokeMaskROI.count == qroi.roiW * qroi.roiH {
+                    debugStrokeMaskFull?.withUnsafeMutableBufferPointer { buf in
+                        for y in 0..<qroi.roiH {
+                            let srcRow = y * qroi.roiW
+                            let dstRow = (qroi.y0 + y) * w
+                            for x in 0..<qroi.roiW {
+                                if vres.strokeMaskROI[srcRow + x] != 0 {
+                                    buf[dstRow + qroi.x0 + x] = 1
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             totalVertErased += vres.erasedCount
@@ -389,7 +465,7 @@ enum OfflineScoreColorizer {
             )
 
             log.notice("HorizontalStrokeEraser after roi=\(index, privacy: .public) erasedCount=\(hres.erasedCount, privacy: .public)")
-            if debugStrokeEraseEnabled() {
+            if debugMasksEnabled() {
                 lastHorizMask = hres.horizMask
             }
 
@@ -413,7 +489,7 @@ enum OfflineScoreColorizer {
             )
 
             log.notice("HorizontalStrokeEraser after global erasedCount=\(globalHoriz.erasedCount, privacy: .public)")
-            if debugStrokeEraseEnabled() {
+            if debugMasksEnabled() {
                 lastHorizMask = globalHoriz.horizMask
             }
 
@@ -422,8 +498,8 @@ enum OfflineScoreColorizer {
             binary = globalHoriz.binaryWithoutHorizontals
         }
 
-        if debugStrokeEraseEnabled(),
-           let sm = lastStrokeMask,
+        if debugMasksEnabled(),
+           let sm = debugStrokeMaskFull,
            sm.count == w * h,
            let hm = lastHorizMask,
            hm.count == w * h {
@@ -434,7 +510,7 @@ enum OfflineScoreColorizer {
                 width: w,
                 height: h
             )
-        } else if !debugStrokeEraseEnabled() {
+        } else if !debugMasksEnabled() {
             debugMaskData = nil
         }
 
@@ -504,30 +580,6 @@ enum OfflineScoreColorizer {
         #else
         return nil
         #endif
-    }
-
-    private static func dilateMask(_ mask: [UInt8],
-                                   width: Int,
-                                   height: Int,
-                                   radius: Int) -> [UInt8] {
-        guard radius > 0 else { return mask }
-        var out = mask
-        for y in 0..<height {
-            for x in 0..<width {
-                if mask[y * width + x] == 0 { continue }
-                let x0 = max(0, x - radius)
-                let x1 = min(width - 1, x + radius)
-                let y0 = max(0, y - radius)
-                let y1 = min(height - 1, y + radius)
-                for yy in y0...y1 {
-                    let row = yy * width
-                    for xx in x0...x1 {
-                        out[row + xx] = 1
-                    }
-                }
-            }
-        }
-        return out
     }
 
     // ------------------------------------------------------------------
@@ -1119,6 +1171,90 @@ enum OfflineScoreColorizer {
         }
     }
 
+    private static func sanitizeBarlines(_ barlines: [CGRect],
+                                         systems: [SystemBlock],
+                                         spacing: CGFloat) -> [CGRect] {
+        guard !barlines.isEmpty, !systems.isEmpty else { return [] }
+        let maxWidth = max(2.0, spacing * 0.5)
+        let tallAndFatWidth = spacing * 0.35
+        let systemByRect: (CGRect) -> SystemBlock? = { rect in
+            let center = CGPoint(x: rect.midX, y: rect.midY)
+            if let direct = systems.first(where: { $0.bbox.contains(center) }) {
+                return direct
+            }
+            return systems.first(where: { $0.bbox.intersects(rect) })
+        }
+
+        var sanitized: [CGRect] = []
+        sanitized.reserveCapacity(barlines.count)
+
+        for rect in barlines {
+            guard let system = systemByRect(rect) else { continue }
+            let systemHeight = max(1.0, system.bbox.height)
+            if rect.width > spacing * 0.8 || rect.height > 0.98 * systemHeight {
+                log.warning("barline sanity drop fat/tall rect=(\(Int(rect.minX)),\(Int(rect.minY))) \(Int(rect.width))x\(Int(rect.height))")
+                continue
+            }
+            if rect.height > 0.92 * systemHeight && rect.width > tallAndFatWidth { continue }
+            if rect.width > maxWidth { continue }
+            if rect.minX < system.bbox.minX || rect.maxX > system.bbox.maxX { continue }
+
+            let systemWidth = max(1.0, system.bbox.width)
+            let symbolWidth = min(systemWidth * 0.40, spacing * 8.0)
+            let symbolZone = CGRect(x: system.bbox.minX,
+                                    y: system.bbox.minY,
+                                    width: symbolWidth,
+                                    height: system.bbox.height)
+            let intersection = rect.intersection(symbolZone)
+            if intersection.width / max(1.0, rect.width) > 0.20 { continue }
+
+            sanitized.append(rect)
+        }
+
+        sanitized = mergeBarlinesByX(sanitized, maxGap: max(2.0, spacing * 0.12))
+
+        if !sanitized.isEmpty {
+            let widths = sanitized.map(\.width)
+            let heights = sanitized.map(\.height)
+            let minW = widths.min() ?? 0
+            let maxW = widths.max() ?? 0
+            let minH = heights.min() ?? 0
+            let maxH = heights.max() ?? 0
+            log.notice("barline sanity count=\(sanitized.count, privacy: .public) w=[\(String(format: "%.1f", minW)), \(String(format: "%.1f", maxW))] h=[\(String(format: "%.1f", minH)), \(String(format: "%.1f", maxH))]")
+
+            let topLargest = sanitized
+                .sorted { $0.height * $0.width > $1.height * $1.width }
+                .prefix(5)
+                .map { rect in
+                    "(\(Int(rect.minX)),\(Int(rect.minY))) \(Int(rect.width))x\(Int(rect.height))"
+                }
+                .joined(separator: " | ")
+            if !topLargest.isEmpty {
+                log.notice("barline sanity largest=\(topLargest, privacy: .public)")
+            }
+        }
+
+        return sanitized
+    }
+
+    private static func mergeBarlinesByX(_ barlines: [CGRect], maxGap: CGFloat) -> [CGRect] {
+        guard barlines.count >= 2 else { return barlines }
+        let sorted = barlines.sorted { $0.minX < $1.minX }
+        var merged: [CGRect] = []
+        merged.reserveCapacity(sorted.count)
+        var current = sorted[0]
+        for rect in sorted.dropFirst() {
+            if rect.minX - current.maxX <= maxGap {
+                current = current.union(rect)
+            } else {
+                merged.append(current)
+                current = rect
+            }
+        }
+        merged.append(current)
+        return merged
+    }
+
     private static func longestVerticalRun(bin: [UInt8],
                                            width: Int,
                                            height: Int,
@@ -1205,7 +1341,7 @@ enum OfflineScoreColorizer {
 
             let baseRadius = max(6.0, (staff?.lineSpacing ?? 12.0) * 0.75)
 
-            if debugDrawStaffLines, let staff {
+            if debugDrawStaffLinesEnabled(), let staff {
                 let colors: [UIColor] = [
                     .systemRed, .systemBlue, .systemGreen, .systemOrange, .systemPurple, .systemPink
                 ]
@@ -1265,15 +1401,10 @@ enum OfflineScoreColorizer {
                 drawStatusStamp(text: statusStamp, in: ctx.cgContext)
             }
 
-            if debugStrokeEraseEnabled(), let maskData = debugMaskData,
-               let overlay = buildMaskOverlayImage(maskData: maskData, size: image.size) {
+            if debugMasksEnabled(), let maskData = debugMaskData,
+               let overlay = buildMaskOverlayImage(maskData: maskData) {
                 let debugOverlayAlpha: CGFloat = 0.08
-                let drawSize: CGSize
-                if let cg = image.cgImageSafe {
-                    drawSize = CGSize(width: CGFloat(cg.width), height: CGFloat(cg.height))
-                } else {
-                    drawSize = image.size
-                }
+                let drawSize = CGSize(width: CGFloat(maskData.width), height: CGFloat(maskData.height))
                 ctx.cgContext.setAlpha(debugOverlayAlpha)
                 ctx.cgContext.draw(overlay, in: CGRect(origin: .zero, size: drawSize))
             }
@@ -1351,7 +1482,7 @@ enum OfflineScoreColorizer {
         }
     }
 
-    private static func buildMaskOverlayImage(maskData: DebugMaskData, size: CGSize) -> CGImage? {
+    private static func buildMaskOverlayImage(maskData: DebugMaskData) -> CGImage? {
         let w = maskData.width
         let h = maskData.height
         guard maskData.strokeMask.count == w * h,
