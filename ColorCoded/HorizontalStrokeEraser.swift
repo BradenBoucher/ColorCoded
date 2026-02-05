@@ -1,6 +1,8 @@
 import CoreGraphics
+import os
 
 enum HorizontalStrokeEraser {
+    private static let log = Logger(subsystem: "ColorCoded", category: "HorizontalStrokeEraser")
 
     struct Result {
         let binaryWithoutHorizontals: [UInt8]
@@ -18,7 +20,7 @@ enum HorizontalStrokeEraser {
         spacing: CGFloat,
         protectMask: [UInt8]
     ) -> Result {
-        fatalError("🔥 HorizontalStrokeEraser HIT")
+        log.notice("eraseHorizontalRuns enter roi=\(String(describing: roi), privacy: .public)")
 
         var out = binary
         var mask = [UInt8](repeating: 0, count: width * height)
@@ -101,7 +103,7 @@ enum HorizontalStrokeEraser {
             }
         }
 
-        print("✅ HorizontalStrokeEraser RUNNING — erasedPixels=\(erased)")
+        log.notice("eraseHorizontalRuns done erasedPixels=\(erased, privacy: .public)")
         return Result(binaryWithoutHorizontals: out, horizMask: mask, erasedCount: erased)
     }
 }

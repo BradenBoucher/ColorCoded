@@ -2,6 +2,7 @@ import Foundation
 import PDFKit
 @preconcurrency import Vision
 import CoreGraphics
+import os
 
 #if canImport(UIKit)
 import UIKit
@@ -30,6 +31,7 @@ private struct DebugMaskData {
 private var debugMaskData: DebugMaskData?
 
 enum OfflineScoreColorizer {
+    private static let log = Logger(subsystem: "ColorCoded", category: "OfflinePipeline")
 
     // ------------------------------------------------------------------
     // TUNING
@@ -81,6 +83,7 @@ enum OfflineScoreColorizer {
         let outDoc = PDFDocument()
 
         for pageIndex in 0..<doc.pageCount {
+            log.notice("colorizePDF entering page \(pageIndex + 1, privacy: .public)/\(doc.pageCount, privacy: .public)")
             try await withCheckedThrowingContinuation { continuation in
                 autoreleasepool {
                     guard let page = doc.page(at: pageIndex) else {
@@ -104,6 +107,7 @@ enum OfflineScoreColorizer {
 
                         let cleanedImage = cleaned?.image
                         let cleanedBinary = cleaned?.binaryPage
+                        log.notice("systems.count=\(systems.count, privacy: .public) cleaned!=nil=\(cleaned != nil, privacy: .public)")
 
                         // High recall note candidates (debug flavor returns boxes + maybe extra info)
                         let detection = await NoteheadDetector.detectDebug(in: cleanedImage ?? image)
@@ -121,11 +125,14 @@ enum OfflineScoreColorizer {
                             binaryOverride: cleanedBinary
                         )
 
+                        let horizErasedCount = cleaned?.horizErasedCount ?? -1
+                        let watermarkText = "PIPELINE: CLEANED=\(cleaned != nil) H_ERASE=\(horizErasedCount)"
                         let colored = drawOverlays(
                             on: image,
                             staff: staffModel,
                             noteheads: filtered,
-                            barlines: barlines
+                            barlines: barlines,
+                            pipelineWatermark: watermarkText
                         )
 
                         if let pdfPage = PDFPage(image: colored) {
@@ -195,6 +202,7 @@ enum OfflineScoreColorizer {
     private struct CleanedStrokeResult {
         let image: PlatformImage
         let binaryPage: ([UInt8], Int, Int)
+        let horizErasedCount: Int
     }
 
     private static func buildStrokeCleaned(baseImage: PlatformImage,
@@ -219,6 +227,7 @@ enum OfflineScoreColorizer {
                                            spacing: CGFloat,
                                            systems: [SystemBlock],
                                            protectRects: [CGRect]) -> CleanedStrokeResult? {
+        log.notice("enter buildStrokeCleaned(cgImage:)")
         _ = HorizontalStrokeEraser.self
         let (bin, w, h) = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         var binary = bin
@@ -277,7 +286,8 @@ enum OfflineScoreColorizer {
         var lastStrokeMask: [UInt8]?
         var lastHorizMask: [UInt8]?
 
-        for system in systems {
+        for (index, system) in systems.enumerated() {
+            log.notice("VerticalStrokeEraser before system=\(index, privacy: .public)")
             let vres = VerticalStrokeEraser.eraseStrokes(
                 binary: binary,
                 width: w,
@@ -287,15 +297,15 @@ enum OfflineScoreColorizer {
                 protectMask: protectMask
             )
 
+            log.notice("VerticalStrokeEraser after system=\(index, privacy: .public) erasedCount=\(vres.erasedCount, privacy: .public)")
             if debugStrokeErase {
                 lastStrokeMask = vres.strokeMask
-                print("StrokeErase system erased=\(vres.erasedCount) strokeTotal=\(vres.totalStrokeCount)")
             }
 
             binary = vres.binaryWithoutStrokes
 
             // NEW: horizontal eraser (beams/ties/ledger leftovers)
-            print("✅ about to call HorizontalStrokeEraser")
+            log.notice("HorizontalStrokeEraser before system=\(index, privacy: .public)")
             let hres = HorizontalStrokeEraser.eraseHorizontalRuns(
                 binary: binary,
                 width: w,
@@ -305,15 +315,16 @@ enum OfflineScoreColorizer {
                 protectMask: protectMask
             )
 
+            log.notice("HorizontalStrokeEraser after system=\(index, privacy: .public) erasedCount=\(hres.erasedCount, privacy: .public)")
             if debugStrokeErase {
                 lastHorizMask = hres.horizMask
-                print("HorizErase system erased=\(hres.erasedCount)")
             }
 
             binary = hres.binaryWithoutHorizontals
         }
 
         // Extra global pass (catches lines outside system bbox)
+        log.notice("HorizontalStrokeEraser before global")
         let globalHoriz = HorizontalStrokeEraser.eraseHorizontalRuns(
             binary: binary,
             width: w,
@@ -323,9 +334,9 @@ enum OfflineScoreColorizer {
             protectMask: protectMask
         )
 
+        log.notice("HorizontalStrokeEraser after global erasedCount=\(globalHoriz.erasedCount, privacy: .public)")
         if debugStrokeErase {
             lastHorizMask = globalHoriz.horizMask
-            print("HorizErase global erased=\(globalHoriz.erasedCount)")
         }
 
         binary = globalHoriz.binaryWithoutHorizontals
@@ -343,7 +354,11 @@ enum OfflineScoreColorizer {
         guard let cleanedCG = buildBinaryCGImage(from: binary, width: w, height: h),
               let cleanedImg = makePlatformImage(from: cleanedCG) else { return nil }
 
-        return CleanedStrokeResult(image: cleanedImg, binaryPage: (binary, w, h))
+        return CleanedStrokeResult(
+            image: cleanedImg,
+            binaryPage: (binary, w, h),
+            horizErasedCount: globalHoriz.erasedCount
+        )
     }
 
     private static func markMask(_ mask: inout [UInt8], rect: CGRect, width: Int, height: Int) {
@@ -411,6 +426,7 @@ enum OfflineScoreColorizer {
                                                   fallbackSpacing: CGFloat,
                                                   cgImage: CGImage?,
                                                   binaryOverride: ([UInt8], Int, Int)?) -> [CGRect] {
+        log.notice("filterNoteheadsHighRecall binaryOverride.nil=\(binaryOverride == nil, privacy: .public)")
         guard !noteheads.isEmpty else { return [] }
 
         // If systems not found, only do dedupe (avoid losing notes)
@@ -883,7 +899,8 @@ enum OfflineScoreColorizer {
     private static func drawOverlays(on image: PlatformImage,
                                      staff: StaffModel?,
                                      noteheads: [CGRect],
-                                     barlines: [CGRect]) -> PlatformImage {
+                                     barlines: [CGRect],
+                                     pipelineWatermark: String?) -> PlatformImage {
         #if canImport(UIKit)
         let renderer = UIGraphicsImageRenderer(size: image.size)
         return renderer.image { ctx in
@@ -920,6 +937,10 @@ enum OfflineScoreColorizer {
                 for rect in barlines { ctx.cgContext.stroke(rect) }
             }
 
+            if let watermark = pipelineWatermark {
+                drawPipelineWatermark(text: watermark, in: ctx.cgContext)
+            }
+
             if debugStrokeErase, let maskData = debugMaskData,
                let overlay = buildMaskOverlayImage(maskData: maskData, size: image.size) {
                 ctx.cgContext.setAlpha(0.25)
@@ -928,6 +949,32 @@ enum OfflineScoreColorizer {
         }
         #else
         return image
+        #endif
+    }
+
+    private static func drawPipelineWatermark(text: String, in context: CGContext) {
+        #if canImport(UIKit)
+        let font = UIFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: UIColor.black.withAlphaComponent(0.85)
+        ]
+        let attributed = NSAttributedString(string: text, attributes: attrs)
+        let size = attributed.size()
+        let padding = CGSize(width: 6, height: 4)
+        let origin = CGPoint(x: 8, y: 8)
+        let backgroundRect = CGRect(
+            x: origin.x - padding.width,
+            y: origin.y - padding.height,
+            width: size.width + padding.width * 2,
+            height: size.height + padding.height * 2
+        )
+
+        context.saveGState()
+        context.setFillColor(UIColor.white.withAlphaComponent(0.75).cgColor)
+        context.fill(backgroundRect)
+        attributed.draw(at: origin)
+        context.restoreGState()
         #endif
     }
 
