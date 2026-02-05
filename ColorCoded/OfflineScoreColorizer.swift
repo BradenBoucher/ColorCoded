@@ -1367,7 +1367,7 @@ enum OfflineScoreColorizer {
     // LINE-LIKENESS VIA PCA
     // ------------------------------------------------------------------
 
-    private struct PCALineMetrics {
+    private struct LineLikenessPCA {
         let eccentricity: Double
         let isLineLike: Bool
     }
@@ -1375,10 +1375,10 @@ enum OfflineScoreColorizer {
     private static func lineLikenessPCA(_ rect: CGRect,
                                         bin: [UInt8],
                                         pageW: Int,
-                                        pageH: Int) -> PCALineMetrics {
+                                        pageH: Int) -> LineLikenessPCA {
         let clipped = rect.intersection(CGRect(x: 0, y: 0, width: pageW, height: pageH))
         guard clipped.width > 0, clipped.height > 0 else {
-            return PCALineMetrics(eccentricity: 1.0, isLineLike: false)
+            return LineLikenessPCA(eccentricity: 1.0, isLineLike: false)
         }
 
         let x0 = max(0, Int(floor(clipped.minX)))
@@ -1408,7 +1408,7 @@ enum OfflineScoreColorizer {
         }
 
         guard ptsX.count >= 12 else {
-            return PCALineMetrics(eccentricity: 1.0, isLineLike: false)
+            return LineLikenessPCA(eccentricity: 1.0, isLineLike: false)
         }
 
         let mx = ptsX.reduce(0, +) / Double(ptsX.count)
@@ -1437,7 +1437,7 @@ enum OfflineScoreColorizer {
         let ecc = sqrt(l1 / l2)
         let isLine = ecc > 5.0
 
-        return PCALineMetrics(eccentricity: ecc, isLineLike: isLine)
+        return LineLikenessPCA(eccentricity: ecc, isLineLike: isLine)
     }
 
     // ------------------------------------------------------------------
