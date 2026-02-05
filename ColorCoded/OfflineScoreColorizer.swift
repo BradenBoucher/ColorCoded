@@ -1647,7 +1647,12 @@ enum OfflineScoreColorizer {
                     table,
                     vImage_Flags(kvImageNoFlags)
                 )
-                needsFallback = err != kvImageNoError
+                thresholdErr = err
+            }
+        }
+        if thresholdErr != kvImageNoError {
+            for i in 0..<bin.count {
+                bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
             }
         }
         #endif
