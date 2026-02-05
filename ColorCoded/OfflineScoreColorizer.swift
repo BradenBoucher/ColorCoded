@@ -1594,7 +1594,7 @@ enum OfflineScoreColorizer {
         let tGrayAlloc = CFAbsoluteTimeGetCurrent()
         var gray = [UInt8](repeating: 0, count: w * h)
         let grayAllocMs = (CFAbsoluteTimeGetCurrent() - tGrayAlloc) * 1000.0
-        log.notice("PERF binaryGrayAllocMs=\(String(format: "%.1f", grayAllocMs), privacy: .public)")
+        log.notice("PERF binaryGrayAllocMs=\(String(format: \"%.1f\", grayAllocMs), privacy: .public)")
 
         let tRender = CFAbsoluteTimeGetCurrent()
         gray.withUnsafeMutableBytes { buf in
@@ -1614,7 +1614,7 @@ enum OfflineScoreColorizer {
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
         }
         let grayRenderMs = (CFAbsoluteTimeGetCurrent() - tRender) * 1000.0
-        log.notice("PERF binaryGrayRenderMs=\(String(format: "%.1f", grayRenderMs), privacy: .public)")
+        log.notice("PERF binaryGrayRenderMs=\(String(format: \"%.1f\", grayRenderMs), privacy: .public)")
 
         let tThreshold = CFAbsoluteTimeGetCurrent()
         var bin = [UInt8](repeating: 0, count: w * h)
@@ -1651,7 +1651,7 @@ enum OfflineScoreColorizer {
         }
         #endif
         let thresholdMs = (CFAbsoluteTimeGetCurrent() - tThreshold) * 1000.0
-        log.notice("PERF binaryThresholdMs=\(String(format: "%.1f", thresholdMs), privacy: .public)")
+        log.notice("PERF binaryThresholdMs=\(String(format: \"%.1f\", thresholdMs), privacy: .public)")
         return (bin, w, h)
     }
 
