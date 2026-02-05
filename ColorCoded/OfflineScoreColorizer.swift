@@ -1618,39 +1618,9 @@ enum OfflineScoreColorizer {
 
         let tThreshold = CFAbsoluteTimeGetCurrent()
         var bin = [UInt8](repeating: 0, count: w * h)
-        #if canImport(Accelerate)
-        gray.withUnsafeBytes { srcBytes in
-            bin.withUnsafeMutableBytes { dstBytes in
-                guard let srcBase = srcBytes.baseAddress,
-                      let dstBase = dstBytes.baseAddress else { return }
-                var src = vImage_Buffer(
-                    data: UnsafeMutableRawPointer(mutating: srcBase),
-                    height: vImagePixelCount(h),
-                    width: vImagePixelCount(w),
-                    rowBytes: w
-                )
-                var dst = vImage_Buffer(
-                    data: dstBase,
-                    height: vImagePixelCount(h),
-                    width: vImagePixelCount(w),
-                    rowBytes: w
-                )
-                let threshold = Pixel_8(max(0, min(255, lumThreshold)))
-                vImageThreshold_Planar8(
-                    &src,
-                    &dst,
-                    threshold,
-                    1,
-                    0,
-                    vImage_Flags(kvImageNoFlags)
-                )
-            }
-        }
-        #else
         for i in 0..<bin.count {
             bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
         }
-        #endif
         let thresholdMs = (CFAbsoluteTimeGetCurrent() - tThreshold) * 1000.0
         log.notice("PERF binaryThresholdMs=\(String(format: "%.1f", thresholdMs), privacy: .public)")
         return (bin, w, h)
