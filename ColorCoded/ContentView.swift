@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var coloredPDFURL: URL?
     @State private var status: String = "Import a PDF (or scan on iOS)."
     @State private var isProcessing = false
+    @AppStorage("cc_debug_masks") private var debugMasksEnabled = false
 
     @State private var showScanner = false
 
@@ -78,6 +79,11 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(pickedPDFURL == nil || isProcessing)
+
+                Toggle("Debug Masks", isOn: $debugMasksEnabled)
+                    .toggleStyle(.switch)
+                    .font(.subheadline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                 if let coloredPDFURL {
                     ShareLink(item: coloredPDFURL) {

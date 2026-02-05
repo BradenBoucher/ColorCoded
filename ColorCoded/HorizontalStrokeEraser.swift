@@ -18,7 +18,8 @@ enum HorizontalStrokeEraser {
         height: Int,
         roi: CGRect,
         spacing: CGFloat,
-        protectMask: [UInt8]
+        protectMask: [UInt8],
+        staffLines: [CGFloat]
     ) -> Result {
         log.notice("eraseHorizontalRuns enter roi=\(String(describing: roi), privacy: .public)")
 
@@ -29,8 +30,11 @@ enum HorizontalStrokeEraser {
 
         // Tunables (safe defaults)
         let minRun = max(16, Int((1.8 * u).rounded()))           // "long"
+        let minCurveRun = max(12, Int((1.2 * u).rounded()))      // allow mild curvature
         let maxThickness = max(1, Int((0.18 * u).rounded()))     // "thin band"
         let protectMaxFrac: Double = 0.08                        // don't erase if too protected
+        let tieBand = max(1, Int((0.12 * u).rounded()))
+        let nearStaffEpsilon = spacing * 0.15
 
         let clipped = roi.intersection(CGRect(x: 0, y: 0, width: width, height: height))
         guard clipped.width > 2, clipped.height > 2 else {
@@ -85,8 +89,37 @@ enum HorizontalStrokeEraser {
 
                 let protectFrac = Double(protectHits) / Double(max(1, inkSamples))
 
-                // Erase if thin and not protected
-                if protectFrac <= protectMaxFrac && maxT <= (2 * maxThickness + 1) {
+                let isThin = maxT <= (2 * maxThickness + 1)
+                let isNearStaff = staffLines.contains { abs($0 - CGFloat(y)) <= nearStaffEpsilon }
+                let protectNearStaff = isNearStaff && protectFrac > 0.0
+
+                var isCurvedBand = false
+                if runLen >= minCurveRun && isThin {
+                    var bandHits = 0
+                    var bandSamples = 0
+                    var sx = runStart
+                    while sx < runEnd {
+                        bandSamples += 1
+                        var found = false
+                        for dy in -tieBand...tieBand {
+                            let yy = y + dy
+                            if yy < 0 || yy >= height { continue }
+                            if out[yy * width + sx] != 0 {
+                                found = true
+                                break
+                            }
+                        }
+                        if found { bandHits += 1 }
+                        sx += 2
+                    }
+                    let bandFrac = Double(bandHits) / Double(max(1, bandSamples))
+                    isCurvedBand = bandFrac >= 0.65
+                }
+
+                let qualifies = runLen >= minRun || isCurvedBand
+
+                // Erase if thin and not protected (extra guard near staff lines)
+                if qualifies && isThin && protectFrac <= protectMaxFrac && !protectNearStaff {
                     let band = max(1, maxThickness)
                     for yy in max(0, y - band)...min(height - 1, y + band) {
                         let row = yy * width
