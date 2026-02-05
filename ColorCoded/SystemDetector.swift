@@ -63,8 +63,8 @@ enum SystemDetector {
                                     bass: [CGFloat],
                                     spacing: CGFloat,
                                     imageSize: CGSize) -> SystemBlock {
-        let topPad = spacing * 2.5
-        let botPad = spacing * 2.5
+        let topPad = spacing * 2.0
+        let botPad = spacing * 2.0
 
         let top = (treble.min() ?? 0) - topPad
         let bottom = (bass.max() ?? 0) + botPad
@@ -86,8 +86,8 @@ enum SystemDetector {
     private static func buildSingleStaffSystem(staffLines: [CGFloat],
                                                spacing: CGFloat,
                                                imageSize: CGSize) -> SystemBlock {
-        let topPad = spacing * 2.2
-        let botPad = spacing * 2.2
+        let topPad = spacing * 2.0
+        let botPad = spacing * 2.0
         let top = (staffLines.min() ?? 0) - topPad
         let bottom = (staffLines.max() ?? 0) + botPad
         let y0 = max(0, top)
@@ -131,8 +131,8 @@ enum SystemDetector {
             let topLines = cluster.first ?? []
             let bottomLines = cluster.count > 1 ? (cluster.last ?? []) : []
             let allLines = cluster.flatMap { $0 }
-            let topPad = spacing * 2.4
-            let botPad = spacing * 2.4
+            let topPad = spacing * 2.0
+            let botPad = spacing * 2.0
             let top = (allLines.min() ?? 0) - topPad
             let bottom = (allLines.max() ?? 0) + botPad
             let y0 = max(0, top)
