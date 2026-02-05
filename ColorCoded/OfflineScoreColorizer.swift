@@ -1619,12 +1619,13 @@ enum OfflineScoreColorizer {
         let tThreshold = CFAbsoluteTimeGetCurrent()
         var bin = [UInt8](repeating: 0, count: w * h)
         #if canImport(Accelerate)
-        gray.withUnsafeMutableBytes { grayBuf in
+        var thresholdErr: vImage_Error = kvImageNoError
+        gray.withUnsafeBytes { grayBuf in
             bin.withUnsafeMutableBytes { binBuf in
                 guard let grayBase = grayBuf.baseAddress,
                       let binBase = binBuf.baseAddress else { return }
                 var src = vImage_Buffer(
-                    data: grayBase,
+                    data: UnsafeMutableRawPointer(mutating: grayBase),
                     height: vImagePixelCount(h),
                     width: vImagePixelCount(w),
                     rowBytes: w
@@ -1636,21 +1637,22 @@ enum OfflineScoreColorizer {
                     rowBytes: w
                 )
                 let thresh = Pixel_8(clamping: lumThreshold)
-                let maxVal: Pixel_8 = 1
-                let minVal: Pixel_8 = 0
-                let err = vImageThreshold_Planar8(
+                var table = [UInt8](repeating: 0, count: 256)
+                for i in 0..<256 {
+                    table[i] = i < Int(thresh) ? 1 : 0
+                }
+                let err = vImageTableLookUp_Planar8(
                     &src,
                     &dst,
-                    thresh,
-                    maxVal,
-                    minVal,
+                    table,
                     vImage_Flags(kvImageNoFlags)
                 )
-                if err != kvImageNoError {
-                    for i in 0..<bin.count {
-                        bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
-                    }
-                }
+                thresholdErr = err
+            }
+        }
+        if thresholdErr != kvImageNoError {
+            for i in 0..<bin.count {
+                bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
             }
         }
         #else
