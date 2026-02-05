@@ -22,29 +22,36 @@ enum StaffDetector {
 
         guard let small = cg.resized(width: targetW, height: targetH) else { return nil }
 
-        // Build a horizontal "ink" projection by counting dark pixels per row.
-        guard let rows = small.horizontalInkProjection() else { return nil }
+        let thresholds = [80, 120]
+        var bestModel: StaffModel?
+        var bestScore = -1
 
-        // Find peaks (rows with lots of dark pixels)
-        let peaks = findPeaks(rows, minDistance: 3, thresholdFracOfMax: 0.55)
-        if peaks.count < 5 { return nil }
+        for threshold in thresholds {
+            guard let rows = small.horizontalInkProjection(lumThreshold: threshold) else { continue }
 
-        // Convert peak indices back to original-image coordinates
-        let ys = peaks.map { CGFloat($0) / scale }
+            let peaks = findPeaks(rows, minDistance: 3, thresholdFracOfMax: 0.55)
+            if peaks.count < 5 { continue }
 
-        // Group into staves of 5 lines
-        let grouped = groupIntoStaves(ys: ys)
+            let ys = peaks.map { CGFloat($0) / scale }
+            var grouped = groupIntoStaves(ys: ys)
 
-        // Estimate spacing from first staff if possible
-        let spacing: CGFloat
-        if let first = grouped.first, first.count == 5 {
-            let diffs = zip(first.dropFirst(), first).map { $0 - $1 }
-            spacing = diffs.sorted()[diffs.count / 2]
-        } else {
-            spacing = 12
+            if grouped.isEmpty, let fallback = bestSingleStaff(from: ys) {
+                grouped = [fallback]
+            }
+
+            guard !grouped.isEmpty else { continue }
+
+            let spacing = estimateSpacing(from: grouped)
+            let model = StaffModel(staves: grouped, lineSpacing: max(6, spacing))
+
+            let score = grouped.count * 10 + peaks.count
+            if score > bestScore {
+                bestScore = score
+                bestModel = model
+            }
         }
 
-        return StaffModel(staves: grouped, lineSpacing: max(6, spacing))
+        return bestModel
     }
 
     private static func findPeaks(_ rows: [Int], minDistance: Int, thresholdFracOfMax: Double) -> [Int] {
@@ -91,6 +98,35 @@ enum StaffDetector {
 
         return staves
     }
+
+    private static func estimateSpacing(from grouped: [[CGFloat]]) -> CGFloat {
+        if let first = grouped.first, first.count == 5 {
+            let diffs = zip(first.dropFirst(), first).map { $0 - $1 }
+            return diffs.sorted()[diffs.count / 2]
+        }
+        return 12
+    }
+
+    private static func bestSingleStaff(from ys: [CGFloat]) -> [CGFloat]? {
+        let sorted = ys.sorted()
+        guard sorted.count >= 5 else { return nil }
+        var best: [CGFloat]?
+        var bestScore = Double.greatestFiniteMagnitude
+        for i in 0...(sorted.count - 5) {
+            let candidate = Array(sorted[i..<(i + 5)])
+            let diffs = zip(candidate.dropFirst(), candidate).map { $0 - $1 }
+            let mean = diffs.reduce(0, +) / CGFloat(diffs.count)
+            let variance = diffs.reduce(0.0) { acc, val in
+                let delta = Double(val - mean)
+                return acc + (delta * delta)
+            } / Double(diffs.count)
+            if variance < bestScore {
+                bestScore = variance
+                best = candidate
+            }
+        }
+        return best
+    }
 }
 
 // MARK: - CGImage helpers
@@ -113,7 +149,7 @@ private extension CGImage {
         return ctx.makeImage()
     }
 
-    func horizontalInkProjection() -> [Int]? {
+    func horizontalInkProjection(lumThreshold: Int) -> [Int]? {
         let w = self.width
         let h = self.height
         let pixelCount = w * h
@@ -148,7 +184,7 @@ private extension CGImage {
                 let g = Int(data[idx + 1])
                 let b = Int(data[idx + 2])
                 let lum = (r + g + b) / 3
-                if lum < 80 { count += 1 } // dark threshold
+                if lum < lumThreshold { count += 1 } // dark threshold
             }
             rows[y] = count
         }
