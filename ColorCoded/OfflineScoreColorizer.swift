@@ -14,6 +14,7 @@ private let debugStrokeErase = true
 private struct DebugMaskData {
     let strokeMask: [UInt8]
     let protectMask: [UInt8]
+    let horizMask: [UInt8]
     let width: Int
     let height: Int
 }
@@ -252,6 +253,7 @@ enum OfflineScoreColorizer {
 
         // Erase strokes per system
         var lastStrokeMask: [UInt8]?
+        var lastHorizMask: [UInt8]?
         for system in systems {
             let result = VerticalStrokeEraser.eraseStrokes(
                 binary: binary,
@@ -268,6 +270,22 @@ enum OfflineScoreColorizer {
             }
 
             binary = result.binaryWithoutStrokes
+
+            let hres = HorizontalStrokeEraser.eraseHorizontalRuns(
+                binary: binary,
+                width: w,
+                height: h,
+                roi: system.bbox,
+                spacing: spacing,
+                protectMask: protectMask
+            )
+
+            if debugStrokeErase {
+                lastHorizMask = hres.horizMask
+                print("HorizErase system erased=\(hres.erasedCount)")
+            }
+
+            binary = hres.binaryWithoutHorizontals
         }
 
         if debugStrokeErase {
@@ -287,6 +305,7 @@ enum OfflineScoreColorizer {
             debugMaskData = DebugMaskData(
                 strokeMask: sm,
                 protectMask: protectMask,
+                horizMask: lastHorizMask ?? [UInt8](repeating: 0, count: w * h),
                 width: w,
                 height: h
             )
@@ -929,7 +948,9 @@ enum OfflineScoreColorizer {
     private static func buildMaskOverlayImage(maskData: DebugMaskData, size: CGSize) -> CGImage? {
         let w = maskData.width
         let h = maskData.height
-        guard maskData.strokeMask.count == w * h, maskData.protectMask.count == w * h else { return nil }
+        guard maskData.strokeMask.count == w * h,
+              maskData.protectMask.count == w * h,
+              maskData.horizMask.count == w * h else { return nil }
         var rgba = [UInt8](repeating: 0, count: w * h * 4)
         for y in 0..<h {
             let row = y * w
@@ -940,6 +961,10 @@ enum OfflineScoreColorizer {
                 if maskData.strokeMask[idx] != 0 {
                     rgba[rgbaIdx] = 255
                     rgba[rgbaIdx + 3] = 120
+                }
+                if maskData.horizMask[idx] != 0 {
+                    rgba[rgbaIdx + 2] = 255
+                    rgba[rgbaIdx + 3] = max(rgba[rgbaIdx + 3], 120)
                 }
                 if maskData.protectMask[idx] != 0 {
                     rgba[rgbaIdx + 1] = 255
