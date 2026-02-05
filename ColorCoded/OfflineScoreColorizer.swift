@@ -18,9 +18,7 @@ func /-/ (lhs: CGRect, rhs: CGFloat) -> CGRect {
     lhs.insetBy(dx: -rhs, dy: -rhs)
 }
 
-private var debugStrokeErase: Bool {
-    UserDefaults.standard.bool(forKey: "cc_debug_masks")
-}
+private let debugStrokeErase = true
 private let debugDrawStaffLines = true
 
 private struct DebugMaskData {
