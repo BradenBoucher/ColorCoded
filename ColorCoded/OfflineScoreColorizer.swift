@@ -103,9 +103,13 @@ enum OfflineScoreColorizer {
                         let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
 
                         // Build stroke-cleaned image AND keep the cleaned binary.
+                        debugMaskData = nil
                         let cleaned = await buildStrokeCleaned(baseImage: image,
                                                               staffModel: staffModel,
                                                               systems: systems)
+                        if cleaned == nil {
+                            debugMaskData = nil
+                        }
 
                         let cleanedImage = cleaned?.image
                         let cleanedBinary = cleaned?.binaryPage
@@ -143,6 +147,7 @@ enum OfflineScoreColorizer {
                         if let pdfPage = PDFPage(image: colored) {
                             outDoc.insert(pdfPage, at: outDoc.pageCount)
                         }
+                        debugMaskData = nil
                         continuation.resume(returning: ())
                     }
                 }
@@ -362,14 +367,20 @@ enum OfflineScoreColorizer {
             binary = globalHoriz.binaryWithoutHorizontals
         }
 
-        if debugStrokeErase, let sm = lastStrokeMask {
+        if debugStrokeErase,
+           let sm = lastStrokeMask,
+           sm.count == w * h,
+           let hm = lastHorizMask,
+           hm.count == w * h {
             debugMaskData = DebugMaskData(
                 strokeMask: sm,
                 protectMask: protectMask,
-                horizMask: lastHorizMask ?? [UInt8](repeating: 0, count: w * h),
+                horizMask: hm,
                 width: w,
                 height: h
             )
+        } else if !debugStrokeErase {
+            debugMaskData = nil
         }
 
         guard let cleanedCG = buildBinaryCGImage(from: binary, width: w, height: h),
@@ -994,8 +1005,15 @@ enum OfflineScoreColorizer {
 
             if debugStrokeErase, let maskData = debugMaskData,
                let overlay = buildMaskOverlayImage(maskData: maskData, size: image.size) {
-                ctx.cgContext.setAlpha(0.25)
-                ctx.cgContext.draw(overlay, in: CGRect(origin: .zero, size: image.size))
+                let debugOverlayAlpha: CGFloat = 0.08
+                let drawSize: CGSize
+                if let cg = image.cgImageSafe {
+                    drawSize = CGSize(width: CGFloat(cg.width), height: CGFloat(cg.height))
+                } else {
+                    drawSize = image.size
+                }
+                ctx.cgContext.setAlpha(debugOverlayAlpha)
+                ctx.cgContext.draw(overlay, in: CGRect(origin: .zero, size: drawSize))
             }
         }
         #else
