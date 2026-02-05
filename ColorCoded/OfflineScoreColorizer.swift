@@ -1624,7 +1624,7 @@ enum OfflineScoreColorizer {
                 guard let grayBase = grayBuf.baseAddress,
                       let binBase = binBuf.baseAddress else { return }
                 var src = vImage_Buffer(
-                    data: grayBase,
+                    data: UnsafeMutableRawPointer(mutating: grayBase),
                     height: vImagePixelCount(h),
                     width: vImagePixelCount(w),
                     rowBytes: w
@@ -1646,11 +1646,12 @@ enum OfflineScoreColorizer {
                     table,
                     vImage_Flags(kvImageNoFlags)
                 )
-                if err != kvImageNoError {
-                    for i in 0..<bin.count {
-                        bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
-                    }
-                }
+                thresholdErr = err
+            }
+        }
+        if thresholdErr != kvImageNoError {
+            for i in 0..<bin.count {
+                bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
             }
         }
         #else
