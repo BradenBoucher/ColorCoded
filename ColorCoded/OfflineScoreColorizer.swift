@@ -386,16 +386,19 @@ enum OfflineScoreColorizer {
                 let srcRow = y * w
                 let dstRow = (y - qroi.y0) * qroi.roiW
                 for x in qroi.x0...qroi.x1 {
-                    verticalScratch.protectROI[dstRow + (x - qroi.x0)] = protectMask[srcRow + x]
+                    let value = protectMask[srcRow + x]
+                    let ri = dstRow + (x - qroi.x0)
+                    verticalScratch.protectROI[ri] = value
+                    verticalScratch.protectExpandedROI[ri] = value
                 }
             }
 
             var protectDilateMs = 0.0
             if protectDilateR > 0 {
                 let protectStart = CFAbsoluteTimeGetCurrent()
-                VerticalStrokeEraser.boxDilateROI(maskROI: &verticalScratch.protectROI,
+                VerticalStrokeEraser.boxDilateROI(maskROI: &verticalScratch.protectExpandedROI,
                                                   tempROI: &verticalScratch.temp,
-                                                  outROI: &verticalScratch.protectExpandedROI,
+                                                  outROI: &verticalScratch.out,
                                                   roiW: qroi.roiW,
                                                   roiH: qroi.roiH,
                                                   radiusX: protectDilateR,
@@ -410,7 +413,7 @@ enum OfflineScoreColorizer {
                     height: h,
                     roi: qroi,
                     spacing: spacing,
-                    protectExpandedROI: verticalScratch.protectROI,
+                    protectExpandedROI: verticalScratch.protectExpandedROI,
                     scratch: &verticalScratch
                 )
                 : VerticalStrokeEraser.Result(
@@ -429,8 +432,24 @@ enum OfflineScoreColorizer {
                 )
 
             log.notice("VerticalStrokeEraser after roi=\(index, privacy: .public) erasedCount=\(vres.erasedCount, privacy: .public)")
+            log.notice("VerticalStrokeEraser timing roi=\(index, privacy: .public) area=\(qroi.roiW * qroi.roiH, privacy: .public) pass1Ms=\(vres.pass1Ms, privacy: .public) pass2Ms=\(vres.pass2Ms, privacy: .public) strokeDilateMs=\(vres.strokeDilateMs, privacy: .public) protectDilateMs=\(protectDilateMs, privacy: .public) eraseLoopMs=\(vres.eraseLoopMs, privacy: .public)")
             if debugMasksEnabled() {
-                lastStrokeMask = vres.strokeMask
+                if debugStrokeMaskFull?.count != w * h {
+                    debugStrokeMaskFull = [UInt8](repeating: 0, count: w * h)
+                } else if var mask = debugStrokeMaskFull {
+                    for i in 0..<mask.count { mask[i] = 0 }
+                    debugStrokeMaskFull = mask
+                }
+                if var fullMask = debugStrokeMaskFull {
+                    for y in qroi.y0...qroi.y1 {
+                        let srcRow = (y - qroi.y0) * qroi.roiW
+                        let dstRow = y * w
+                        for x in qroi.x0...qroi.x1 {
+                            fullMask[dstRow + x] = vres.strokeMaskROI[srcRow + (x - qroi.x0)]
+                        }
+                    }
+                    debugStrokeMaskFull = fullMask
+                }
             }
 
             totalVertErased += vres.erasedCount
@@ -483,7 +502,7 @@ enum OfflineScoreColorizer {
         }
 
         if debugMasksEnabled(),
-           let sm = lastStrokeMask,
+           let sm = debugStrokeMaskFull,
            sm.count == w * h,
            let hm = lastHorizMask,
            hm.count == w * h {
