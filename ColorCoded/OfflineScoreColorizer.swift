@@ -24,6 +24,18 @@ private func debugStrokeEraseEnabled() -> Bool {
     UserDefaults.standard.bool(forKey: "cc_debug_masks")
 }
 
+private func debugDrawBarlinesEnabled() -> Bool {
+    UserDefaults.standard.bool(forKey: "cc_debug_barlines") || debugStrokeEraseEnabled()
+}
+
+private func verticalEraseEnabled() -> Bool {
+    UserDefaults.standard.object(forKey: "cc_enable_vertical_erase") as? Bool ?? true
+}
+
+private func barlineVetoEnabled() -> Bool {
+    UserDefaults.standard.object(forKey: "cc_enable_barline_veto") as? Bool ?? true
+}
+
 private struct DebugMaskData {
     let strokeMask: [UInt8]
     let protectMask: [UInt8]
@@ -128,7 +140,11 @@ enum OfflineScoreColorizer {
                         let detection = await NoteheadDetector.detectDebug(in: image)
 
                         // Barlines
-                        let barlines = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
+                        let barlinesRaw = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
+                        let barlines = filterConfidentBarlines(barlinesRaw,
+                                                               systems: systems,
+                                                               spacing: staffModel?.lineSpacing ?? 12.0,
+                                                               binaryRaw: rawBinary)
 
                         // Use raw binary for shape metrics, cleaned binary for line/stem rejection.
                         let filtered = filterNoteheadsHighRecall(
@@ -273,7 +289,7 @@ enum OfflineScoreColorizer {
             minRun: max(12, Int((2.0 * u).rounded()))
         )
 
-        // Protect mask (tight!)
+        // Protect mask (notehead neighborhoods)
         var protectMask = [UInt8](repeating: 0, count: w * h)
         let minDim = 0.35 * u
         let maxDim = 1.8 * u
@@ -309,8 +325,13 @@ enum OfflineScoreColorizer {
                 if gsm.overlapRatio(with: neighborhood) > 0.12 { continue }
             }
 
-            let core = rect.insetBy(dx: -0.10 * u, dy: -0.10 * u)
+            let core = rect.insetBy(dx: -0.45 * u, dy: -0.35 * u)
             markMask(&protectMask, rect: core, width: w, height: h)
+        }
+
+        let protectDilateR = max(1, Int((0.20 * u).rounded()))
+        if protectDilateR > 0 {
+            protectMask = dilateMask(protectMask, width: w, height: h, radius: protectDilateR)
         }
 
         let fullPageRect = CGRect(x: 0, y: 0, width: w, height: h)
@@ -331,14 +352,21 @@ enum OfflineScoreColorizer {
         for (index, roi) in rois.enumerated() {
             let staffLines = staffLinesByROI[index]
             log.notice("VerticalStrokeEraser before roi=\(index, privacy: .public)")
-            let vres = VerticalStrokeEraser.eraseStrokes(
-                binary: binary,
-                width: w,
-                height: h,
-                systemRect: roi,
-                spacing: spacing,
-                protectMask: protectMask
-            )
+            let vres = verticalEraseEnabled()
+                ? VerticalStrokeEraser.eraseStrokes(
+                    binary: binary,
+                    width: w,
+                    height: h,
+                    systemRect: roi,
+                    spacing: spacing,
+                    protectMask: protectMask
+                )
+                : VerticalStrokeEraser.Result(
+                    binaryWithoutStrokes: binary,
+                    strokeMask: [UInt8](repeating: 0, count: w * h),
+                    erasedCount: 0,
+                    totalStrokeCount: 0
+                )
 
             log.notice("VerticalStrokeEraser after roi=\(index, privacy: .public) erasedCount=\(vres.erasedCount, privacy: .public)")
             if debugStrokeEraseEnabled() {
@@ -476,6 +504,30 @@ enum OfflineScoreColorizer {
         #else
         return nil
         #endif
+    }
+
+    private static func dilateMask(_ mask: [UInt8],
+                                   width: Int,
+                                   height: Int,
+                                   radius: Int) -> [UInt8] {
+        guard radius > 0 else { return mask }
+        var out = mask
+        for y in 0..<height {
+            for x in 0..<width {
+                if mask[y * width + x] == 0 { continue }
+                let x0 = max(0, x - radius)
+                let x1 = min(width - 1, x + radius)
+                let y0 = max(0, y - radius)
+                let y1 = min(height - 1, y + radius)
+                for yy in y0...y1 {
+                    let row = yy * width
+                    for xx in x0...x1 {
+                        out[row + xx] = 1
+                    }
+                }
+            }
+        }
+        return out
     }
 
     // ------------------------------------------------------------------
@@ -794,15 +846,15 @@ enum OfflineScoreColorizer {
         }
 
         // Barline neighborhood veto
-        if !strongNotehead, !barlineXs.isEmpty {
+        if barlineVetoEnabled(), !strongNotehead, !barlineXs.isEmpty {
             let cx = rect.midX
-            let nearBarline = barlineXs.contains { abs($0 - cx) < spacing * 0.22 }
+            let nearBarline = barlineXs.contains { abs($0 - cx) < spacing * 0.12 }
             if nearBarline {
                 let smallish = max(w, h) < spacing * 0.65
-                if smallish && (strokeOverlap > 0.04 || colStem || lineLike) { return true }
+                if smallish && (strokeOverlap > 0.10 || colStem || lineLike) { return true }
 
                 let tallish = h > spacing * 0.60
-                if tallish && strokeOverlap > 0.06 { return true }
+                if tallish && strokeOverlap > 0.12 { return true }
 
                 if colStem { return true }
             }
@@ -997,15 +1049,97 @@ enum OfflineScoreColorizer {
         guard rawW == cleanW, rawH == cleanH else { return }
 
         var damaged = 0
+        var offenders: [(ratio: Double, rect: CGRect)] = []
         for rect in filtered {
             let fillRaw = rectInkExtent(rect, bin: rawBin, pageW: rawW, pageH: rawH)
             let fillClean = rectInkExtent(rect, bin: cleanBin, pageW: cleanW, pageH: cleanH)
             if fillRaw > 0.0 && fillClean < 0.6 * fillRaw {
                 damaged += 1
+                offenders.append((ratio: fillClean / max(0.001, fillRaw), rect: rect))
             }
         }
 
         log.warning("notehead health check damagedHeads=\(damaged, privacy: .public)")
+        if !offenders.isEmpty {
+            let worst = offenders.sorted { $0.ratio < $1.ratio }.prefix(10)
+            let details = worst.enumerated().map { idx, item in
+                let r = item.rect
+                return "#\(idx + 1) ratio=\(String(format: "%.2f", item.ratio)) rect=(\(Int(r.minX)),\(Int(r.minY))) \(Int(r.width))x\(Int(r.height))"
+            }.joined(separator: " | ")
+            log.warning("notehead health worst=\(details, privacy: .public)")
+        }
+    }
+
+    private static func filterConfidentBarlines(_ barlines: [CGRect],
+                                                systems: [SystemBlock],
+                                                spacing: CGFloat,
+                                                binaryRaw: ([UInt8], Int, Int)?) -> [CGRect] {
+        guard !barlines.isEmpty, !systems.isEmpty else { return [] }
+        let widthLimit = max(2.0, 0.12 * spacing)
+        let heightFracMin: CGFloat = 0.60
+        let runFracMin: CGFloat = 0.55
+        let systemByRect: (CGRect) -> SystemBlock? = { rect in
+            let center = CGPoint(x: rect.midX, y: rect.midY)
+            if let direct = systems.first(where: { $0.bbox.contains(center) }) {
+                return direct
+            }
+            return systems.first(where: { $0.bbox.intersects(rect) })
+        }
+
+        return barlines.compactMap { rect in
+            guard let system = systemByRect(rect) else { return nil }
+            let systemHeight = max(1.0, system.bbox.height)
+            let heightFrac = rect.height / systemHeight
+            if heightFrac < heightFracMin { return nil }
+            if rect.width > widthLimit { return nil }
+
+            if !system.bassLines.isEmpty {
+                let trebleTop = system.trebleLines.min() ?? system.bbox.minY
+                let bassBottom = system.bassLines.max() ?? system.bbox.maxY
+                if rect.minY > trebleTop - 0.5 * spacing { return nil }
+                if rect.maxY < bassBottom + 0.5 * spacing { return nil }
+            }
+
+            if let binaryRaw {
+                let (bin, pageW, pageH) = binaryRaw
+                let x = min(pageW - 1, max(0, Int(rect.midX.rounded())))
+                let y0 = max(0, Int(system.bbox.minY.rounded()))
+                let y1 = min(pageH - 1, Int(system.bbox.maxY.rounded()))
+                let longest = max(
+                    longestVerticalRun(bin: bin, width: pageW, height: pageH, x: x - 1, y0: y0, y1: y1),
+                    max(
+                        longestVerticalRun(bin: bin, width: pageW, height: pageH, x: x, y0: y0, y1: y1),
+                        longestVerticalRun(bin: bin, width: pageW, height: pageH, x: x + 1, y0: y0, y1: y1)
+                    )
+                )
+                if CGFloat(longest) < runFracMin * systemHeight { return nil }
+            }
+
+            return rect
+        }
+    }
+
+    private static func longestVerticalRun(bin: [UInt8],
+                                           width: Int,
+                                           height: Int,
+                                           x: Int,
+                                           y0: Int,
+                                           y1: Int) -> Int {
+        guard x >= 0, x < width else { return 0 }
+        let minY = max(0, min(height - 1, y0))
+        let maxY = max(0, min(height - 1, y1))
+        if maxY < minY { return 0 }
+        var maxRun = 0
+        var run = 0
+        for y in minY...maxY {
+            if bin[y * width + x] != 0 {
+                run += 1
+                maxRun = max(maxRun, run)
+            } else {
+                run = 0
+            }
+        }
+        return maxRun
     }
 
     private static func minDistanceToAnyStaffLine(y: CGFloat, system: SystemBlock) -> CGFloat {
@@ -1118,7 +1252,7 @@ enum OfflineScoreColorizer {
                                                      height: dotR * 2))
             }
 
-            if !barlines.isEmpty {
+            if debugDrawBarlinesEnabled(), !barlines.isEmpty {
                 ctx.cgContext.setLineWidth(max(1.5, baseRadius * 0.12))
                 ctx.cgContext.setStrokeColor(UIColor.systemTeal.withAlphaComponent(0.55).cgColor)
                 for rect in barlines { ctx.cgContext.stroke(rect) }
