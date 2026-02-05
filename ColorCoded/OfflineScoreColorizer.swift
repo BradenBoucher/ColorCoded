@@ -429,24 +429,8 @@ enum OfflineScoreColorizer {
                 )
 
             log.notice("VerticalStrokeEraser after roi=\(index, privacy: .public) erasedCount=\(vres.erasedCount, privacy: .public)")
-            log.notice("VerticalStrokeEraser timing roi=\(index, privacy: .public) area=\(qroi.roiW * qroi.roiH, privacy: .public) pass1=\(vres.pass1Ms, privacy: .public)ms pass2=\(vres.pass2Ms, privacy: .public)ms strokeDilate=\(vres.strokeDilateMs, privacy: .public)ms protectDilate=\(protectDilateMs, privacy: .public)ms erase=\(vres.eraseLoopMs, privacy: .public)ms")
             if debugMasksEnabled() {
-                if debugStrokeMaskFull == nil {
-                    debugStrokeMaskFull = [UInt8](repeating: 0, count: w * h)
-                }
-                if vres.strokeMaskROI.count == qroi.roiW * qroi.roiH {
-                    debugStrokeMaskFull?.withUnsafeMutableBufferPointer { buf in
-                        for y in 0..<qroi.roiH {
-                            let srcRow = y * qroi.roiW
-                            let dstRow = (qroi.y0 + y) * w
-                            for x in 0..<qroi.roiW {
-                                if vres.strokeMaskROI[srcRow + x] != 0 {
-                                    buf[dstRow + qroi.x0 + x] = 1
-                                }
-                            }
-                        }
-                    }
-                }
+                lastStrokeMask = vres.strokeMask
             }
 
             totalVertErased += vres.erasedCount
@@ -499,7 +483,7 @@ enum OfflineScoreColorizer {
         }
 
         if debugMasksEnabled(),
-           let sm = debugStrokeMaskFull,
+           let sm = lastStrokeMask,
            sm.count == w * h,
            let hm = lastHorizMask,
            hm.count == w * h {
