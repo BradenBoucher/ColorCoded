@@ -151,6 +151,7 @@ enum OfflineScoreColorizer {
                                                               systems: systems,
                                                               protectRects: noteRects)
                         let strokeMs = (CFAbsoluteTimeGetCurrent() - strokeStart) * 1000.0
+                        log.notice("PERF strokeMs=\(String(format: "%.1f", strokeMs), privacy: .public)")
                         if cleaned == nil {
                             debugMaskData = nil
                         }
@@ -352,8 +353,17 @@ enum OfflineScoreColorizer {
         var protectMask = [UInt8](repeating: 0, count: w * h)
         let minDim = 0.35 * u
         let maxDim = 1.8 * u
+        let protectUnion: CGRect = {
+            guard !systems.isEmpty else { return CGRect(x: 0, y: 0, width: w, height: h) }
+            let expand = 0.6 * u
+            return systems
+                .map { $0.bbox.insetBy(dx: -expand, dy: -expand) }
+                .reduce(CGRect.null) { $0.union($1) }
+                .intersection(CGRect(x: 0, y: 0, width: w, height: h))
+        }()
 
         for rect in protectRects {
+            guard rect.intersects(protectUnion) else { continue }
             let rw = rect.width
             let rh = rect.height
             guard rw >= minDim, rh >= minDim else { continue }
@@ -382,7 +392,8 @@ enum OfflineScoreColorizer {
             }
 
             let core = rect.insetBy(dx: -0.45 * u, dy: -0.35 * u)
-            markMask(&protectMask, rect: core, width: w, height: h)
+            let clippedCore = core.intersection(protectUnion)
+            markMask(&protectMask, rect: clippedCore, width: w, height: h)
         }
         let protectMaskMs = (CFAbsoluteTimeGetCurrent() - tP0) * 1000.0
         log.notice("PERF protectMaskMs=\(String(format: "%.1f", protectMaskMs), privacy: .public)")
@@ -460,7 +471,7 @@ enum OfflineScoreColorizer {
                 )
 
             log.notice("VerticalStrokeEraser after roi=\(index, privacy: .public) erasedCount=\(vres.erasedCount, privacy: .public)")
-            log.notice("VerticalStrokeEraser timing roi=\(index, privacy: .public) area=\(qroi.roiW * qroi.roiH, privacy: .public) pass1Ms=\(vres.pass1Ms, privacy: .public) pass2Ms=\(vres.pass2Ms, privacy: .public) strokeDilateMs=\(vres.strokeDilateMs, privacy: .public) protectDilateMs=\(protectDilateMs, privacy: .public) eraseLoopMs=\(vres.eraseLoopMs, privacy: .public)")
+            log.notice("VerticalStrokeEraser timing roi=\(index, privacy: .public) area=\(qroi.roiW * qroi.roiH, privacy: .public) passMs=\(vres.pass1Ms, privacy: .public) protectDilateMs=\(protectDilateMs, privacy: .public)")
 
             if debugMasksEnabled() {
                 if debugStrokeMaskFull?.count != w * h {
