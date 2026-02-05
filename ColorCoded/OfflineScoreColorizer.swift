@@ -222,7 +222,12 @@ enum OfflineScoreColorizer {
                         let pdfMs = (CFAbsoluteTimeGetCurrent() - pdfStart) * 1000.0
                         log.notice("PERF pdfMs=\(String(format: "%.1f", pdfMs), privacy: .public)")
                         let pageMs = (CFAbsoluteTimeGetCurrent() - pageStart) * 1000.0
-                        log.notice("TIMING page=\(pageIndex + 1, privacy: .public) render=\(String(format: "%.1f", renderMs), privacy: .public)ms staff=\(String(format: "%.1f", staffMs), privacy: .public)ms systems=\(String(format: "%.1f", systemsMs), privacy: .public)ms stroke=\(String(format: "%.1f", strokeMs), privacy: .public)ms note=\(String(format: "%.1f", protectDetectMs), privacy: .public)ms bar=\(String(format: "%.1f", barlineMs), privacy: .public)ms filter=\(String(format: "%.1f", filterMs), privacy: .public)ms draw=\(String(format: "%.1f", drawMs), privacy: .public)ms pdf=\(String(format: "%.1f", pdfMs), privacy: .public)ms total=\(String(format: "%.1f", pageMs), privacy: .public)ms")
+                        let strokeBinaryMs = cleaned?.perfBinaryBuildMs ?? 0
+                        let strokeCopyMs = cleaned?.perfBinaryCopyMs ?? 0
+                        let strokeGsmMs = cleaned?.perfGlobalStrokeMaskMs ?? 0
+                        let strokeProtectMs = cleaned?.perfProtectMaskMs ?? 0
+                        let strokeRoiMs = cleaned?.perfRoiTotalMs ?? 0
+                        log.notice("TIMING page=\(pageIndex + 1, privacy: .public) render=\(String(format: "%.1f", renderMs), privacy: .public)ms staff=\(String(format: "%.1f", staffMs), privacy: .public)ms systems=\(String(format: "%.1f", systemsMs), privacy: .public)ms stroke=\(String(format: "%.1f", strokeMs), privacy: .public)ms strokeBin=\(String(format: "%.1f", strokeBinaryMs), privacy: .public)ms strokeCopy=\(String(format: "%.1f", strokeCopyMs), privacy: .public)ms strokeGsm=\(String(format: "%.1f", strokeGsmMs), privacy: .public)ms strokeProtect=\(String(format: "%.1f", strokeProtectMs), privacy: .public)ms strokeRoi=\(String(format: "%.1f", strokeRoiMs), privacy: .public)ms note=\(String(format: "%.1f", protectDetectMs), privacy: .public)ms bar=\(String(format: "%.1f", barlineMs), privacy: .public)ms filter=\(String(format: "%.1f", filterMs), privacy: .public)ms draw=\(String(format: "%.1f", drawMs), privacy: .public)ms pdf=\(String(format: "%.1f", pdfMs), privacy: .public)ms total=\(String(format: "%.1f", pageMs), privacy: .public)ms")
                         debugMaskData = nil
                         continuation.resume(returning: ())
                     }
@@ -295,8 +300,11 @@ enum OfflineScoreColorizer {
         let horizEraseArea: Int
 
         // Perf breakdown (optional but useful)
+        let perfBinaryBuildMs: Double
+        let perfBinaryCopyMs: Double
         let perfGlobalStrokeMaskMs: Double
         let perfProtectMaskMs: Double
+        let perfRoiTotalMs: Double
         let perfBinaryToCGMs: Double   // will be 0 unless debug enabled
     }
 
@@ -326,9 +334,16 @@ enum OfflineScoreColorizer {
         _ = HorizontalStrokeEraser.self
 
         // --- Binary map (already timed by you outside OR here) ---
+        let tBinary0 = CFAbsoluteTimeGetCurrent()
         let (bin, w, h) = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
+        let binaryBuildMs = (CFAbsoluteTimeGetCurrent() - tBinary0) * 1000.0
+        log.notice("PERF binaryBuildMs=\(String(format: "%.1f", binaryBuildMs), privacy: .public)")
+
+        let tCopy0 = CFAbsoluteTimeGetCurrent()
         let binaryRaw = (bin, w, h)
         var binary = bin
+        let binaryCopyMs = (CFAbsoluteTimeGetCurrent() - tCopy0) * 1000.0
+        log.notice("PERF binaryCopyMs=\(String(format: "%.1f", binaryCopyMs), privacy: .public)")
 
         let u = max(7.0, spacing)
 
@@ -398,7 +413,7 @@ enum OfflineScoreColorizer {
         let protectMaskMs = (CFAbsoluteTimeGetCurrent() - tP0) * 1000.0
         log.notice("PERF protectMaskMs=\(String(format: "%.1f", protectMaskMs), privacy: .public)")
 
-        let protectDilateR = max(1, Int((0.20 * u).rounded()))
+        let protectPad = 0.20 * u
         let fullPageRect = CGRect(x: 0, y: 0, width: w, height: h)
         let rois: [CGRect] = systems.isEmpty ? [fullPageRect] : systems.map(\.bbox)
 
@@ -412,6 +427,7 @@ enum OfflineScoreColorizer {
         var totalHorizErased = 0
         var totalVertErased = 0
         var totalHorizArea = 0
+        var totalRoiMs = 0.0
 
         for (index, roi) in rois.enumerated() {
             guard let qroi = VerticalStrokeEraser.quantize(systemRect: roi, width: w, height: h) else { continue }
@@ -419,34 +435,33 @@ enum OfflineScoreColorizer {
 
             log.notice("VerticalStrokeEraser before roi=\(index, privacy: .public)")
 
-            VerticalStrokeEraser.Scratch.ensureUInt8(&verticalScratch.protectROI, count: qroi.roiW * qroi.roiH)
             VerticalStrokeEraser.Scratch.ensureUInt8(&verticalScratch.protectExpandedROI, count: qroi.roiW * qroi.roiH)
-            VerticalStrokeEraser.Scratch.ensureUInt8(&verticalScratch.temp, count: qroi.roiW * qroi.roiH)
-            VerticalStrokeEraser.Scratch.ensureUInt8(&verticalScratch.out, count: qroi.roiW * qroi.roiH)
+            let protectFillStart = CFAbsoluteTimeGetCurrent()
+            verticalScratch.protectExpandedROI.withUnsafeMutableBufferPointer { buf in
+                guard let base = buf.baseAddress else { return }
+                base.initialize(repeating: 0, count: qroi.roiW * qroi.roiH)
+            }
 
-            for y in qroi.y0...qroi.y1 {
-                let srcRow = y * w
-                let dstRow = (y - qroi.y0) * qroi.roiW
-                for x in qroi.x0...qroi.x1 {
-                    let value = protectMask[srcRow + x]
-                    let ri = dstRow + (x - qroi.x0)
-                    verticalScratch.protectROI[ri] = value
-                    verticalScratch.protectExpandedROI[ri] = value
+            for rect in protectRects {
+                let expanded = rect.insetBy(dx: -protectPad, dy: -protectPad)
+                let clipped = expanded.intersection(roi)
+                guard clipped.width > 0, clipped.height > 0 else { continue }
+
+                let xStart = max(qroi.x0, Int(floor(clipped.minX)))
+                let yStart = max(qroi.y0, Int(floor(clipped.minY)))
+                let xEnd = min(qroi.x1, Int(ceil(clipped.maxX)))
+                let yEnd = min(qroi.y1, Int(ceil(clipped.maxY)))
+                guard xStart <= xEnd, yStart <= yEnd else { continue }
+
+                for y in yStart...yEnd {
+                    let dstRow = (y - qroi.y0) * qroi.roiW
+                    for x in xStart...xEnd {
+                        verticalScratch.protectExpandedROI[dstRow + (x - qroi.x0)] = 1
+                    }
                 }
             }
 
-            var protectDilateMs = 0.0
-            if protectDilateR > 0 {
-                let protectStart = CFAbsoluteTimeGetCurrent()
-                VerticalStrokeEraser.boxDilateROI(maskROI: &verticalScratch.protectExpandedROI,
-                                                  tempROI: &verticalScratch.temp,
-                                                  outROI: &verticalScratch.out,
-                                                  roiW: qroi.roiW,
-                                                  roiH: qroi.roiH,
-                                                  radiusX: protectDilateR,
-                                                  radiusY: protectDilateR)
-                protectDilateMs = (CFAbsoluteTimeGetCurrent() - protectStart) * 1000
-            }
+            let protectRectFillMs = (CFAbsoluteTimeGetCurrent() - protectFillStart) * 1000
 
             let vres = verticalEraseEnabled()
                 ? VerticalStrokeEraser.eraseStrokes(
@@ -493,6 +508,7 @@ enum OfflineScoreColorizer {
             binary = vres.binaryWithoutStrokes
 
             log.notice("HorizontalStrokeEraser before roi=\(index, privacy: .public)")
+            let hStart = CFAbsoluteTimeGetCurrent()
             let hres = HorizontalStrokeEraser.eraseHorizontalRuns(
                 binary: binary,
                 width: w,
@@ -502,7 +518,11 @@ enum OfflineScoreColorizer {
                 protectMask: protectMask,
                 staffLinesY: staffLines
             )
+            let hMs = (CFAbsoluteTimeGetCurrent() - hStart) * 1000
             log.notice("HorizontalStrokeEraser after roi=\(index, privacy: .public) erasedCount=\(hres.erasedCount, privacy: .public)")
+            if hres.erasedCount == 0 {
+                log.notice("HorizontalStrokeEraser skipped roi=\(index, privacy: .public) erasedCount=0")
+            }
 
             if debugMasksEnabled() { lastHorizMask = hres.horizMask }
 
@@ -510,6 +530,8 @@ enum OfflineScoreColorizer {
             let clipped = roi.intersection(fullPageRect)
             totalHorizArea += max(0, Int(clipped.width) * Int(clipped.height))
             binary = hres.binaryWithoutHorizontals
+
+            totalRoiMs += vres.pass1Ms + protectRectFillMs + hMs
         }
 
         if debugMasksEnabled(),
@@ -532,6 +554,7 @@ enum OfflineScoreColorizer {
         // BIG WIN: Only build cleaned image if you actually need it
         // ------------------------------------------------------------
         var binaryToCGMs = 0.0
+        log.notice("PERF roiTotalMs=\(String(format: "%.1f", totalRoiMs), privacy: .public)")
         if debugMasksEnabled() {
             let tC0 = CFAbsoluteTimeGetCurrent()
             _ = buildBinaryCGImage(from: binary, width: w, height: h) // just to validate if you want
@@ -545,8 +568,11 @@ enum OfflineScoreColorizer {
             horizErasedCount: totalHorizErased,
             vertErasedCount: totalVertErased,
             horizEraseArea: totalHorizArea,
+            perfBinaryBuildMs: binaryBuildMs,
+            perfBinaryCopyMs: binaryCopyMs,
             perfGlobalStrokeMaskMs: globalStrokeMaskMs,
             perfProtectMaskMs: protectMaskMs,
+            perfRoiTotalMs: totalRoiMs,
             perfBinaryToCGMs: binaryToCGMs
         )
     }

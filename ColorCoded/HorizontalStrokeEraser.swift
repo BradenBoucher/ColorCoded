@@ -23,9 +23,6 @@ enum HorizontalStrokeEraser {
     ) -> Result {
         log.notice("eraseHorizontalRuns enter roi=\(String(describing: roi), privacy: .public)")
 
-        var out = binary
-        var mask = [UInt8](repeating: 0, count: width * height)
-
         let u = max(7.0, spacing)
 
         // Tunables (ties/slurs only)
@@ -38,7 +35,7 @@ enum HorizontalStrokeEraser {
 
         let clipped = roi.intersection(CGRect(x: 0, y: 0, width: width, height: height))
         guard clipped.width > 2, clipped.height > 2 else {
-            return Result(binaryWithoutHorizontals: out, horizMask: mask, erasedCount: 0)
+            return Result(binaryWithoutHorizontals: binary, horizMask: [], erasedCount: 0)
         }
 
         let x0 = max(0, Int(floor(clipped.minX)))
