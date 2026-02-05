@@ -61,19 +61,60 @@ enum VerticalStrokeEraser {
 
         @inline(__always) func idx(_ x: Int, _ y: Int) -> Int { y * width + x }
         @inline(__always) func ink(_ x: Int, _ y: Int) -> Bool { binary[idx(x, y)] != 0 }
-        @inline(__always) func protectedNearby(_ x: Int, _ y: Int) -> Bool {
-            if protectRadius <= 0 { return false }
-            let x0 = max(0, x - protectRadius)
-            let x1 = min(width - 1, x + protectRadius)
-            let y0 = max(0, y - protectRadius)
-            let y1 = min(height - 1, y + protectRadius)
-            for yy in y0...y1 {
-                let row = yy * width
-                for xx in x0...x1 {
-                    if protectMask[row + xx] != 0 { return true }
+
+        @inline(__always) func boxDilate(mask: [UInt8],
+                                         radiusX: Int,
+                                         radiusY: Int) -> [UInt8] {
+            guard radiusX > 0 || radiusY > 0 else { return mask }
+
+            var temp = [UInt8](repeating: 0, count: width * height)
+            let ry = max(0, radiusY)
+            let rx = max(0, radiusX)
+
+            // Vertical pass.
+            for x in x0...x1 {
+                var sum = 0
+                let yStart = y0
+                let yEnd = y1
+                let yInitEnd = min(yEnd, yStart + ry)
+                if yStart <= yInitEnd {
+                    for y in yStart...yInitEnd {
+                        if mask[idx(x, y)] != 0 { sum += 1 }
+                    }
+                }
+                for y in yStart...yEnd {
+                    if sum > 0 { temp[idx(x, y)] = 1 }
+                    let yRemove = y - ry
+                    if yRemove >= yStart, mask[idx(x, yRemove)] != 0 { sum -= 1 }
+                    let yAdd = y + ry + 1
+                    if yAdd <= yEnd, mask[idx(x, yAdd)] != 0 { sum += 1 }
                 }
             }
-            return false
+
+            // Horizontal pass.
+            var out = [UInt8](repeating: 0, count: width * height)
+            for y in y0...y1 {
+                var sum = 0
+                let xStart = x0
+                let xEnd = x1
+                let xInitEnd = min(xEnd, xStart + rx)
+                if xStart <= xInitEnd {
+                    let row = y * width
+                    for x in xStart...xInitEnd {
+                        if temp[row + x] != 0 { sum += 1 }
+                    }
+                }
+                let row = y * width
+                for x in xStart...xEnd {
+                    if sum > 0 { out[row + x] = 1 }
+                    let xRemove = x - rx
+                    if xRemove >= xStart, temp[row + xRemove] != 0 { sum -= 1 }
+                    let xAdd = x + rx + 1
+                    if xAdd <= xEnd, temp[row + xAdd] != 0 { sum += 1 }
+                }
+            }
+
+            return out
         }
 
         @inline(__always) func findInkNeighborX(_ baseX: Int, _ y: Int) -> Int? {
@@ -193,11 +234,14 @@ enum VerticalStrokeEraser {
 
                 var minX = x, maxX = x, minY = y, maxY = y
                 var pixels = 0
+                var compPixels: [Int] = []
+                compPixels.reserveCapacity(256)
 
                 while let cx = stackX.popLast(), let cy = stackY.popLast() {
                     pixels += 1
                     minX = min(minX, cx); maxX = max(maxX, cx)
                     minY = min(minY, cy); maxY = max(maxY, cy)
+                    compPixels.append(idx(cx, cy))
 
                     for (dx, dy) in neighbor8 {
                         let nx = cx + dx
@@ -220,12 +264,8 @@ enum VerticalStrokeEraser {
                 let shortSide = min(bboxW, bboxH)
 
                 if longSide >= compLongSideMin && shortSide <= compShortSideMax {
-                    for yy in minY...maxY {
-                        for xx in minX...maxX {
-                            if ink(xx, yy) {
-                                strokeMask[idx(xx, yy)] = 1
-                            }
-                        }
+                    for i in compPixels {
+                        strokeMask[i] = 1
                     }
                 }
             }
@@ -235,30 +275,16 @@ enum VerticalStrokeEraser {
         // Dilate stroke mask (inside ROI)
         // ------------------------------------------------------------
         if dilateR > 0 {
-            var dilated = strokeMask
-            for y in y0...y1 {
-                for x in x0...x1 {
-                    if strokeMask[idx(x, y)] == 0 { continue }
-                    let dx = 1
-                    let dy = dilateR + 1
-                    let xx0 = max(x0, x - dx)
-                    let xx1 = min(x1, x + dx)
-                    let yy0 = max(y0, y - dy)
-                    let yy1 = min(y1, y + dy)
-                    for yy in yy0...yy1 {
-                        let row = yy * width
-                        for xx in xx0...xx1 {
-                            dilated[row + xx] = 1
-                        }
-                    }
-                }
-            }
-            strokeMask = dilated
+            strokeMask = boxDilate(mask: strokeMask, radiusX: 1, radiusY: dilateR + 1)
         }
 
         // ------------------------------------------------------------
         // Apply erase (respect protectMask)
         // ------------------------------------------------------------
+        let protectExpanded = protectRadius > 0
+            ? boxDilate(mask: protectMask, radiusX: protectRadius, radiusY: protectRadius)
+            : protectMask
+
         var out = binary
         var erased = 0
         var strokeTotal = 0
@@ -269,7 +295,7 @@ enum VerticalStrokeEraser {
                 let i = row + x
                 if strokeMask[i] != 0 {
                     strokeTotal += 1
-                    if protectMask[i] == 0 && !protectedNearby(x, y) && out[i] != 0 {
+                    if protectExpanded[i] == 0 && out[i] != 0 {
                         out[i] = 0
                         erased += 1
                     }
