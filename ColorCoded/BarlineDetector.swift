@@ -78,45 +78,69 @@ enum BarlineDetector {
             let ty1 = min(sy1, Int(ceil(targetMaxY)))
             let targetH = max(1, ty1 - ty0 + 1)
 
-            // For each column, compute:
-            // - inkCount in target band
-            // - longest continuous vertical run in target band
+            // Pass 1: coarse scan (downsample in X/Y) to find candidate columns.
+            let xStride = 3
+            let yStride = 3
+            let minCoarseInkFrac: Double = 0.25
+            var coarseCandidates = [Int]()
+            var x = x0
+            while x <= x1 {
+                var ink = 0
+                var samples = 0
+                var y = ty0
+                while y <= ty1 {
+                    if isInk(x, y) { ink += 1 }
+                    samples += 1
+                    y += yStride
+                }
+                let inkFrac = samples > 0 ? Double(ink) / Double(samples) : 0.0
+                if inkFrac >= minCoarseInkFrac {
+                    coarseCandidates.append(x)
+                }
+                x += xStride
+            }
+
+            guard !coarseCandidates.isEmpty else { continue }
+
+            // Pass 2: refine around candidate columns (narrow band, lighter sampling).
+            let refineStride = 2
+            let minRunFrac: Double = 0.72  // stems usually fail this for grand staff
+            let minInkFrac: Double = 0.20
+
+            var good = [Bool](repeating: false, count: x1 - x0 + 1)
             var colInk = [Int](repeating: 0, count: x1 - x0 + 1)
             var colMaxRun = [Int](repeating: 0, count: x1 - x0 + 1)
 
-            for x in x0...x1 {
-                var ink = 0
-                var run = 0
-                var bestRun = 0
-
-                // stride 1 is important; barlines are thin
-                for y in ty0...ty1 {
-                    if isInk(x, y) {
-                        ink += 1
-                        run += 1
-                        if run > bestRun { bestRun = run }
-                    } else {
-                        run = 0
+            for candidate in coarseCandidates {
+                let start = max(x0, candidate - 2)
+                let end = min(x1, candidate + 2)
+                for cx in start...end {
+                    var ink = 0
+                    var run = 0
+                    var bestRun = 0
+                    var y = ty0
+                    while y <= ty1 {
+                        if isInk(cx, y) {
+                            ink += 1
+                            run += 1
+                            bestRun = max(bestRun, run)
+                        } else {
+                            run = 0
+                        }
+                        y += refineStride
                     }
+                    colInk[cx - x0] = max(colInk[cx - x0], ink)
+                    colMaxRun[cx - x0] = max(colMaxRun[cx - x0], bestRun)
                 }
-
-                colInk[x - x0] = ink
-                colMaxRun[x - x0] = bestRun
             }
 
             // Smooth a bit (helps with anti-aliased PDFs)
             colInk = smooth(colInk, radius: 1)
             colMaxRun = smooth(colMaxRun, radius: 1)
 
-            // Decide which columns look like barline columns.
-            // Key discriminator: runFrac must be high.
-            let minRunFrac: Double = 0.72  // stems usually fail this for grand staff
-            let minInkFrac: Double = 0.20  // but allow thin lines
-
-            var good = [Bool](repeating: false, count: colInk.count)
             for i in 0..<colInk.count {
-                let runFrac = Double(colMaxRun[i]) / Double(targetH)
-                let inkFrac = Double(colInk[i]) / Double(targetH)
+                let runFrac = (Double(colMaxRun[i]) * Double(refineStride)) / Double(targetH)
+                let inkFrac = (Double(colInk[i]) * Double(refineStride)) / Double(targetH)
                 if runFrac >= minRunFrac && inkFrac >= minInkFrac {
                     good[i] = true
                 }
