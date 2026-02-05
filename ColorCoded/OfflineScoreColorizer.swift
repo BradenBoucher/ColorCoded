@@ -111,29 +111,34 @@ enum OfflineScoreColorizer {
                             debugMaskData = nil
                         }
 
-                        let cleanedImage = cleaned?.image
                         let cleanedBinary = cleaned?.binaryPage
+                        let rawBinary = cleaned?.binaryRaw
                         log.notice("systems.count=\(systems.count, privacy: .public) cleaned!=nil=\(cleaned != nil, privacy: .public) override!=nil=\(cleanedBinary != nil, privacy: .public)")
 
                         // High recall note candidates (debug flavor returns boxes + maybe extra info)
-                        let detection = await NoteheadDetector.detectDebug(in: cleanedImage ?? image)
+                        let detection = await NoteheadDetector.detectDebug(in: image)
 
                         // Barlines
                         let barlines = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
 
-                        // IMPORTANT: use cleanedBinary directly so filtering sees the stroke-erased image.
+                        // Use raw binary for shape metrics, cleaned binary for line/stem rejection.
                         let filtered = filterNoteheadsHighRecall(
                             detection.noteRects,
                             systems: systems,
                             barlines: barlines,
                             fallbackSpacing: staffModel?.lineSpacing ?? 12.0,
                             cgImage: image.cgImageSafe,
-                            binaryOverride: cleanedBinary
+                            binaryRawOverride: rawBinary,
+                            binaryCleanOverride: cleanedBinary
                         )
 
                         let horizErasedCount = cleaned?.horizErasedCount ?? -1
-                        let statusStamp = "systems=\(systems.count) cleaned=\(cleaned != nil) override=\(cleanedBinary != nil) erased=\(horizErasedCount)"
-                        let watermarkText = "PIPELINE: CLEANED=\(cleaned != nil) H_ERASE=\(horizErasedCount)"
+                        let vertErasedCount = cleaned?.vertErasedCount ?? -1
+                        let horizArea = cleaned?.horizEraseArea ?? 0
+                        let horizEraseFrac = horizArea > 0 ? Double(horizErasedCount) / Double(horizArea) : 0
+                        log.notice("metrics systems=\(systems.count, privacy: .public) v=\(vertErasedCount, privacy: .public) h=\(horizErasedCount, privacy: .public) hFrac=\(horizEraseFrac, privacy: .public) candidates=\(detection.noteRects.count, privacy: .public) filtered=\(filtered.count, privacy: .public)")
+                        let statusStamp = "sys=\(systems.count) v=\(vertErasedCount) h=\(horizErasedCount) notes=\(filtered.count)"
+                        let watermarkText = "PIPELINE: CLEANED=\(cleaned != nil) V=\(vertErasedCount) H=\(horizErasedCount)"
                         let colored = drawOverlays(
                             on: image,
                             staff: staffModel,
@@ -211,8 +216,11 @@ enum OfflineScoreColorizer {
 
     private struct CleanedStrokeResult {
         let image: PlatformImage
+        let binaryRaw: ([UInt8], Int, Int)
         let binaryPage: ([UInt8], Int, Int)
         let horizErasedCount: Int
+        let vertErasedCount: Int
+        let horizEraseArea: Int
     }
 
     private static func buildStrokeCleaned(baseImage: PlatformImage,
@@ -240,6 +248,7 @@ enum OfflineScoreColorizer {
         log.notice("enter buildStrokeCleaned(cgImage:)")
         _ = HorizontalStrokeEraser.self
         let (bin, w, h) = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
+        let binaryRaw = (bin, w, h)
         var binary = bin
 
         // Build ONE global vertical-stroke mask to avoid protecting stem neighborhoods.
@@ -294,7 +303,7 @@ enum OfflineScoreColorizer {
 
         let fullPageRect = CGRect(x: 0, y: 0, width: w, height: h)
         let rois: [CGRect] = systems.isEmpty ? [fullPageRect] : systems.map(\.bbox)
-        let runGlobalPass = !(rois.count == 1 && rois[0].origin == .zero && rois[0].size == fullPageRect.size)
+        let enableGlobalHoriz = false
 
         let staffLinesByROI: [[CGFloat]] = systems.isEmpty
             ? [[]]
@@ -304,6 +313,8 @@ enum OfflineScoreColorizer {
         var lastStrokeMask: [UInt8]?
         var lastHorizMask: [UInt8]?
         var totalHorizErased = 0
+        var totalVertErased = 0
+        var totalHorizArea = 0
 
         for (index, roi) in rois.enumerated() {
             let staffLines = staffLinesByROI[index]
@@ -322,6 +333,7 @@ enum OfflineScoreColorizer {
                 lastStrokeMask = vres.strokeMask
             }
 
+            totalVertErased += vres.erasedCount
             binary = vres.binaryWithoutStrokes
 
             // NEW: horizontal eraser (beams/ties/ledger leftovers)
@@ -333,7 +345,7 @@ enum OfflineScoreColorizer {
                 roi: roi,
                 spacing: spacing,
                 protectMask: protectMask,
-                staffLines: staffLines
+                staffLinesY: staffLines
             )
 
             log.notice("HorizontalStrokeEraser after roi=\(index, privacy: .public) erasedCount=\(hres.erasedCount, privacy: .public)")
@@ -342,11 +354,13 @@ enum OfflineScoreColorizer {
             }
 
             totalHorizErased += hres.erasedCount
+            let clipped = roi.intersection(fullPageRect)
+            totalHorizArea += max(0, Int(clipped.width) * Int(clipped.height))
             binary = hres.binaryWithoutHorizontals
         }
 
         // Extra global pass (catches lines outside system bbox)
-        if runGlobalPass {
+        if enableGlobalHoriz {
             log.notice("HorizontalStrokeEraser before global")
             let globalHoriz = HorizontalStrokeEraser.eraseHorizontalRuns(
                 binary: binary,
@@ -355,7 +369,7 @@ enum OfflineScoreColorizer {
                 roi: fullPageRect,
                 spacing: spacing,
                 protectMask: protectMask,
-                staffLines: systems.flatMap { $0.trebleLines + $0.bassLines }
+                staffLinesY: systems.flatMap { $0.trebleLines + $0.bassLines }
             )
 
             log.notice("HorizontalStrokeEraser after global erasedCount=\(globalHoriz.erasedCount, privacy: .public)")
@@ -364,6 +378,7 @@ enum OfflineScoreColorizer {
             }
 
             totalHorizErased += globalHoriz.erasedCount
+            totalHorizArea += max(0, Int(fullPageRect.width) * Int(fullPageRect.height))
             binary = globalHoriz.binaryWithoutHorizontals
         }
 
@@ -388,8 +403,11 @@ enum OfflineScoreColorizer {
 
         return CleanedStrokeResult(
             image: cleanedImg,
+            binaryRaw: binaryRaw,
             binaryPage: (binary, w, h),
-            horizErasedCount: totalHorizErased
+            horizErasedCount: totalHorizErased,
+            vertErasedCount: totalVertErased,
+            horizEraseArea: totalHorizArea
         )
     }
 
@@ -457,8 +475,9 @@ enum OfflineScoreColorizer {
                                                   barlines: [CGRect],
                                                   fallbackSpacing: CGFloat,
                                                   cgImage: CGImage?,
-                                                  binaryOverride: ([UInt8], Int, Int)?) -> [CGRect] {
-        log.notice("filterNoteheadsHighRecall binaryOverride.nil=\(binaryOverride == nil, privacy: .public)")
+                                                  binaryRawOverride: ([UInt8], Int, Int)?,
+                                                  binaryCleanOverride: ([UInt8], Int, Int)?) -> [CGRect] {
+        log.notice("filterNoteheadsHighRecall binaryRaw.nil=\(binaryRawOverride == nil, privacy: .public) binaryClean.nil=\(binaryCleanOverride == nil, privacy: .public)")
         guard !noteheads.isEmpty else { return [] }
 
         // If systems not found, only do dedupe (avoid losing notes)
@@ -467,10 +486,11 @@ enum OfflineScoreColorizer {
         }
 
         // Build binary page once (reused across systems)
-        let binaryPage: ([UInt8], Int, Int)? = binaryOverride ?? {
+        let binaryRaw: ([UInt8], Int, Int)? = binaryRawOverride ?? {
             guard let cgImage else { return nil }
             return buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         }()
+        let binaryClean: ([UInt8], Int, Int)? = binaryCleanOverride ?? binaryRaw
 
         var out: [CGRect] = []
         var consumed = Set<Int>()
@@ -513,8 +533,8 @@ enum OfflineScoreColorizer {
 
             // Build vertical stroke mask in this system (stems/tails detector)
             let vMask: VerticalStrokeMask? = {
-                guard let binaryPage else { return nil }
-                let (bin, w, h) = binaryPage
+                guard let binaryClean else { return nil }
+                let (bin, w, h) = binaryClean
                 let minRun = max(3, Int((spacing * 0.80).rounded()))
                 return VerticalStrokeMask.build(from: bin, width: w, height: h, roi: system.bbox, minRun: minRun)
             }()
@@ -539,15 +559,24 @@ enum OfflineScoreColorizer {
             // Compute shapeScore BEFORE clustering/suppression so junk loses
             let gated = gated0.map { head -> ScoredHead in
                 var h = head
-                guard let binaryPage else { return h }
+                guard let binaryRaw else { return h }
 
-                let (bin, pageW, pageH) = binaryPage
-                let ext = rectInkExtent(h.rect, bin: bin, pageW: pageW, pageH: pageH)
-                let colStem = isStemLikeByColumnDominance(h.rect, bin: bin, pageW: pageW, pageH: pageH)
+                let (rawBin, rawW, rawH) = binaryRaw
+                let ext = rectInkExtent(h.rect, bin: rawBin, pageW: rawW, pageH: rawH)
+                let colStem: Bool = {
+                    guard let binaryClean else { return false }
+                    let (cleanBin, cleanW, cleanH) = binaryClean
+                    return isStemLikeByColumnDominance(h.rect, bin: cleanBin, pageW: cleanW, pageH: cleanH)
+                }()
 
                 let ov = vMask?.overlapRatio(with: h.rect) ?? 0
-                let pca = lineLikenessPCA(h.rect, bin: bin, pageW: pageW, pageH: pageH)
-                let thickness = meanStrokeThickness(h.rect, bin: bin, pageW: pageW, pageH: pageH)
+                let (pca, thickness): (PCALineMetrics, Double) = {
+                    guard let binaryClean else { return (PCALineMetrics(eccentricity: 1.0, isLineLike: false), 999) }
+                    let (cleanBin, cleanW, cleanH) = binaryClean
+                    let pca = lineLikenessPCA(h.rect, bin: cleanBin, pageW: cleanW, pageH: cleanH)
+                    let thickness = meanStrokeThickness(h.rect, bin: cleanBin, pageW: cleanW, pageH: cleanH)
+                    return (pca, thickness)
+                }()
 
                 h.inkExtent = ext
                 h.strokeOverlap = ov
@@ -582,16 +611,14 @@ enum OfflineScoreColorizer {
                                          system: system,
                                          spacing: spacing,
                                          vMask: vMask,
-                                         binaryPage: binaryPage,
+                                         binaryClean: binaryClean,
                                          barlineXs: barlineXs)
             }
 
             // Consolidate (stepIndex + X bin) keeps true head, drops duplicates
             let consolidated = consolidateByStepAndX(
                 pruned,
-                spacing: spacing,
-                barlineXs: barlineXs,
-                binaryPage: binaryPage
+                spacing: spacing
             )
 
             // Final light dedupe
@@ -619,7 +646,7 @@ enum OfflineScoreColorizer {
                                                 system: SystemBlock,
                                                 spacing: CGFloat,
                                                 vMask: VerticalStrokeMask?,
-                                                binaryPage: ([UInt8], Int, Int)?,
+                                                binaryClean: ([UInt8], Int, Int)?,
                                                 barlineXs: [CGFloat]) -> Bool {
 
         let rect = head.rect
@@ -637,8 +664,8 @@ enum OfflineScoreColorizer {
         var ecc: Double = 1.0
         var thickness: Double = 999
 
-        if let binaryPage {
-            let (bin, pageW, pageH) = binaryPage
+        if let binaryClean {
+            let (bin, pageW, pageH) = binaryClean
             colStem = isStemLikeByColumnDominance(rect, bin: bin, pageW: pageW, pageH: pageH)
             let pca = lineLikenessPCA(rect, bin: bin, pageW: pageW, pageH: pageH)
             ecc = pca.eccentricity
@@ -657,13 +684,19 @@ enum OfflineScoreColorizer {
 
         // Ledger / staff-line metrics
         let ledgerMetrics: PatchMetrics? = {
-            guard let binaryPage else { return nil }
-            let (bin, pageW, pageH) = binaryPage
+            guard let binaryClean else { return nil }
+            let (bin, pageW, pageH) = binaryClean
             let ledgerRect = rect.insetBy(dx: -0.25 * u, dy: -0.10 * u).intersection(system.bbox)
             return computePatchMetrics(rect: ledgerRect, bin: bin, pageW: pageW, pageH: pageH)
         }()
 
         if let ledgerMetrics, !strongNotehead {
+            if ledgerMetrics.centerRowMaxRunFrac > 0.70 &&
+                ledgerMetrics.fillRatio < 0.18 &&
+                h < spacing * 0.28 {
+                return true
+            }
+
             if ledgerMetrics.centerRowMaxRunFrac > RejectTuning.ledgerRunFrac,
                ledgerMetrics.fillRatio < RejectTuning.ledgerFillMax {
                 return true
@@ -682,8 +715,8 @@ enum OfflineScoreColorizer {
 
         // Tail-ish metrics
         let tailMetrics: PatchMetrics? = {
-            guard let binaryPage else { return nil }
-            let (bin, pageW, pageH) = binaryPage
+            guard let binaryClean else { return nil }
+            let (bin, pageW, pageH) = binaryClean
             let tailRect = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u).intersection(system.bbox)
             return computePatchMetrics(rect: tailRect, bin: bin, pageW: pageW, pageH: pageH)
         }()
@@ -699,8 +732,8 @@ enum OfflineScoreColorizer {
         }
 
         // Stroke-through veto (diagonal fragments)
-        if !strongNotehead, let binaryPage {
-            let (bin, pageW, pageH) = binaryPage
+        if !strongNotehead, let binaryClean {
+            let (bin, pageW, pageH) = binaryClean
             let expanded = rect.insetBy(dx: -0.10 * u, dy: -0.10 * u).intersection(system.bbox)
             if expanded.width > 1, expanded.height > 1 {
                 let x0 = max(0, Int(floor(expanded.minX)))
@@ -893,9 +926,7 @@ enum OfflineScoreColorizer {
     // ------------------------------------------------------------------
 
     private static func consolidateByStepAndX(_ heads: [ScoredHead],
-                                              spacing: CGFloat,
-                                              barlineXs: [CGFloat],
-                                              binaryPage: ([UInt8], Int, Int)?) -> [CGRect] {
+                                              spacing: CGFloat) -> [CGRect] {
         guard !heads.isEmpty else { return [] }
 
         let xBinWidth = max(2.0, spacing * 0.60)

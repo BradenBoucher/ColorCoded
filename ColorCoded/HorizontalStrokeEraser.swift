@@ -19,7 +19,7 @@ enum HorizontalStrokeEraser {
         roi: CGRect,
         spacing: CGFloat,
         protectMask: [UInt8],
-        staffLines: [CGFloat]
+        staffLinesY: [CGFloat]
     ) -> Result {
         log.notice("eraseHorizontalRuns enter roi=\(String(describing: roi), privacy: .public)")
 
@@ -34,7 +34,7 @@ enum HorizontalStrokeEraser {
         let maxThickness = max(1, Int((0.18 * u).rounded()))     // "thin band"
         let protectMaxFrac: Double = 0.08                        // don't erase if too protected
         let tieBand = max(1, Int((0.12 * u).rounded()))
-        let nearStaffEpsilon = spacing * 0.15
+        let staffExclusion = spacing * 0.18
 
         let clipped = roi.intersection(CGRect(x: 0, y: 0, width: width, height: height))
         guard clipped.width > 2, clipped.height > 2 else {
@@ -49,6 +49,17 @@ enum HorizontalStrokeEraser {
         var erased = 0
 
         @inline(__always)
+        func distanceToNearestStaffLine(y: Int) -> CGFloat {
+            guard !staffLinesY.isEmpty else { return .greatestFiniteMagnitude }
+            let yFloat = CGFloat(y)
+            var best = CGFloat.greatestFiniteMagnitude
+            for ly in staffLinesY {
+                best = min(best, abs(ly - yFloat))
+            }
+            return best
+        }
+
+        @inline(__always)
         func columnThicknessAt(x: Int, y: Int) -> Int {
             var t = 0
             for dy in -maxThickness...maxThickness {
@@ -60,6 +71,9 @@ enum HorizontalStrokeEraser {
         }
 
         for y in y0..<y1 {
+            if distanceToNearestStaffLine(y: y) < staffExclusion {
+                continue
+            }
             var x = x0
             while x < x1 {
                 // find run start
@@ -90,8 +104,6 @@ enum HorizontalStrokeEraser {
                 let protectFrac = Double(protectHits) / Double(max(1, inkSamples))
 
                 let isThin = maxT <= (2 * maxThickness + 1)
-                let isNearStaff = staffLines.contains { abs($0 - CGFloat(y)) <= nearStaffEpsilon }
-                let protectNearStaff = isNearStaff && protectFrac > 0.0
 
                 var isCurvedBand = false
                 if runLen >= minCurveRun && isThin {
@@ -119,7 +131,7 @@ enum HorizontalStrokeEraser {
                 let qualifies = runLen >= minRun || isCurvedBand
 
                 // Erase if thin and not protected (extra guard near staff lines)
-                if qualifies && isThin && protectFrac <= protectMaxFrac && !protectNearStaff {
+                if qualifies && isThin && protectFrac <= protectMaxFrac {
                     let band = max(1, maxThickness)
                     for yy in max(0, y - band)...min(height - 1, y + band) {
                         let row = yy * width
@@ -134,6 +146,13 @@ enum HorizontalStrokeEraser {
                     }
                 }
             }
+        }
+
+        let roiArea = max(1.0, Double((x1 - x0) * (y1 - y0)))
+        let erasedFrac = Double(erased) / roiArea
+        if erasedFrac > 0.06 {
+            log.warning("eraseHorizontalRuns clamp triggered roi=\(String(describing: roi), privacy: .public) erasedFrac=\(erasedFrac, privacy: .public)")
+            return Result(binaryWithoutHorizontals: binary, horizMask: [UInt8](repeating: 0, count: width * height), erasedCount: 0)
         }
 
         log.notice("eraseHorizontalRuns done erasedPixels=\(erased, privacy: .public)")
