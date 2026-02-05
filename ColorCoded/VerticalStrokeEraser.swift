@@ -30,25 +30,32 @@ enum VerticalStrokeEraser {
     }
 
     struct Scratch {
+        // ROI-sized buffers
         var strokeMask: [UInt8] = []
         var thin: [UInt8] = []
         var visited: [UInt8] = []
         var temp: [UInt8] = []
         var out: [UInt8] = []
+
+        // Caller expects these (buildStrokeCleaned was using them)
+        var protectROI: [UInt8] = []
+        var protectExpandedROI: [UInt8] = []
+
+        // Stacks / scratch lists
         var stackX: [Int] = []
         var stackY: [Int] = []
         var runPixelsX: [Int] = []
         var runPixelsY: [Int] = []
         var compPixels: [Int] = []
-        var protectROI: [UInt8] = []
-        var protectExpandedROI: [UInt8] = []
 
-        mutating func ensureUInt8(_ array: inout [UInt8], count: Int) {
+        /// IMPORTANT: static (NOT mutating) to avoid overlapping access to `scratch`
+        static func ensureUInt8(_ array: inout [UInt8], count: Int) {
             if array.count != count {
                 array = [UInt8](repeating: 0, count: count)
             } else {
                 array.withUnsafeMutableBufferPointer { buf in
-                    for i in 0..<count { buf[i] = 0 }
+                    guard let base = buf.baseAddress else { return }
+                    base.initialize(repeating: 0, count: count)
                 }
             }
         }
@@ -75,6 +82,7 @@ enum VerticalStrokeEraser {
         return QuantizedROI(x0: x0, y0: y0, x1: x1, y1: y1, roiW: roiW, roiH: roiH)
     }
 
+    /// Simple ROI-only box dilation (naive; fast enough for ROI sizes you’re using)
     static func boxDilateROI(maskROI: inout [UInt8],
                              tempROI: inout [UInt8],
                              outROI: inout [UInt8],
@@ -82,48 +90,108 @@ enum VerticalStrokeEraser {
                              roiH: Int,
                              radiusX: Int,
                              radiusY: Int) {
-        guard radiusX > 0 || radiusY > 0 else { return }
         let count = roiW * roiH
-        guard tempROI.count == count, outROI.count == count else { return }
+        guard count > 0,
+              maskROI.count == count,
+              tempROI.count == count,
+              outROI.count == count else { return }
 
-        for i in 0..<count { tempROI[i] = 0 }
-        for i in 0..<count { outROI[i] = 0 }
+        // Clear temp/out (memset-fast)
+        tempROI.withUnsafeMutableBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            base.initialize(repeating: 0, count: count)
+        }
+        outROI.withUnsafeMutableBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            base.initialize(repeating: 0, count: count)
+        }
 
+        // If no dilation needed, do nothing
+        guard radiusX > 0 || radiusY > 0 else { return }
+
+        // --- Pass A: vertical dilation into tempROI (sliding window sum) ---
+        if radiusY > 0 {
+            for x in 0..<roiW {
+                var sum = 0
+
+                // initialize window [0 ... radiusY]
+                let initEnd = min(roiH - 1, radiusY)
+                if initEnd >= 0 {
+                    for y in 0...initEnd {
+                        if maskROI[y * roiW + x] != 0 { sum += 1 }
+                    }
+                }
+
+                for y in 0..<roiH {
+                    if sum > 0 { tempROI[y * roiW + x] = 1 }
+
+                    // remove y - radiusY
+                    let yRemove = y - radiusY
+                    if yRemove >= 0 {
+                        if maskROI[yRemove * roiW + x] != 0 { sum -= 1 }
+                    }
+
+                    // add y + radiusY + 1
+                    let yAdd = y + radiusY + 1
+                    if yAdd < roiH {
+                        if maskROI[yAdd * roiW + x] != 0 { sum += 1 }
+                    }
+                }
+            }
+        } else {
+            // No vertical dilation => tempROI = maskROI
+            tempROI.withUnsafeMutableBufferPointer { dst in
+                maskROI.withUnsafeBufferPointer { src in
+                    guard let d = dst.baseAddress, let s = src.baseAddress else { return }
+                    d.assign(from: s, count: count)
+                }
+            }
+        }
+
+        // --- Pass B: horizontal dilation into outROI (sliding window sum) ---
         if radiusX > 0 {
             for y in 0..<roiH {
                 let row = y * roiW
-                for x in 0..<roiW {
-                    let x0 = max(0, x - radiusX)
-                    let x1 = min(roiW - 1, x + radiusX)
-                    var hit = false
-                    for xx in x0...x1 {
-                        if maskROI[row + xx] != 0 { hit = true; break }
+                var sum = 0
+
+                // initialize window [0 ... radiusX]
+                let initEnd = min(roiW - 1, radiusX)
+                if initEnd >= 0 {
+                    for x in 0...initEnd {
+                        if tempROI[row + x] != 0 { sum += 1 }
                     }
-                    if hit { tempROI[row + x] = 1 }
+                }
+
+                for x in 0..<roiW {
+                    if sum > 0 { outROI[row + x] = 1 }
+
+                    // remove x - radiusX
+                    let xRemove = x - radiusX
+                    if xRemove >= 0 {
+                        if tempROI[row + xRemove] != 0 { sum -= 1 }
+                    }
+
+                    // add x + radiusX + 1
+                    let xAdd = x + radiusX + 1
+                    if xAdd < roiW {
+                        if tempROI[row + xAdd] != 0 { sum += 1 }
+                    }
                 }
             }
         } else {
-            for i in 0..<count { tempROI[i] = maskROI[i] }
-        }
-
-        if radiusY > 0 {
-            for y in 0..<roiH {
-                for x in 0..<roiW {
-                    let y0 = max(0, y - radiusY)
-                    let y1 = min(roiH - 1, y + radiusY)
-                    var hit = false
-                    for yy in y0...y1 {
-                        if tempROI[yy * roiW + x] != 0 { hit = true; break }
-                    }
-                    if hit { outROI[y * roiW + x] = 1 }
+            // No horizontal dilation => outROI = tempROI
+            outROI.withUnsafeMutableBufferPointer { dst in
+                tempROI.withUnsafeBufferPointer { src in
+                    guard let d = dst.baseAddress, let s = src.baseAddress else { return }
+                    d.assign(from: s, count: count)
                 }
             }
-        } else {
-            for i in 0..<count { outROI[i] = tempROI[i] }
         }
 
+        // result back into maskROI
         swap(&maskROI, &outROI)
     }
+
 
     static func eraseStrokes(binary: [UInt8],
                              width: Int,
@@ -137,51 +205,39 @@ enum VerticalStrokeEraser {
               protectExpandedROI.count == roi.roiW * roi.roiH else {
             return Result(binaryWithoutStrokes: binary,
                           strokeMaskROI: [],
-                          roiX: roi.x0,
-                          roiY: roi.y0,
-                          roiW: roi.roiW,
-                          roiH: roi.roiH,
-                          erasedCount: 0,
-                          totalStrokeCount: 0,
-                          pass1Ms: 0,
-                          pass2Ms: 0,
-                          strokeDilateMs: 0,
-                          eraseLoopMs: 0)
+                          roiX: roi.x0, roiY: roi.y0, roiW: roi.roiW, roiH: roi.roiH,
+                          erasedCount: 0, totalStrokeCount: 0,
+                          pass1Ms: 0, pass2Ms: 0, strokeDilateMs: 0, eraseLoopMs: 0)
         }
 
         let u = max(6.0, spacing)
 
-        // --- Tunables ---
+        // Tunables
         let minRun = max(10, Int((2.2 * u).rounded()))
         let maxGap = max(1, Int((0.12 * u).rounded()))
         let maxWidth = max(2, Int((0.15 * u).rounded()))
         let longRunThreshold = Int((3.2 * u).rounded())
         let maxWidthLong = max(4, Int((0.22 * u).rounded()))
         let dilateR = max(1, Int((0.06 * u).rounded()))
-        // Extra pass: diagonal/curved thin components (tails/slurs)
+
         let thinWidth = max(2, Int((0.12 * u).rounded()))
         let compLongSideMin = max(10, Int((1.15 * u).rounded()))
         let compShortSideMax = max(3, Int((0.28 * u).rounded()))
         let compMinPixels = max(18, Int((0.45 * u).rounded()))
 
-        let x0 = roi.x0
-        let y0 = roi.y0
-        let x1 = roi.x1
-        let y1 = roi.y1
-        let roiW = roi.roiW
-        let roiH = roi.roiH
+        let x0 = roi.x0, y0 = roi.y0, x1 = roi.x1, y1 = roi.y1
+        let roiW = roi.roiW, roiH = roi.roiH
+        let roiCount = roiW * roiH
 
-        scratch.ensureUInt8(&scratch.strokeMask, count: roiW * roiH)
-        scratch.ensureUInt8(&scratch.thin, count: roiW * roiH)
-        scratch.ensureUInt8(&scratch.visited, count: roiW * roiH)
-        scratch.ensureUInt8(&scratch.temp, count: roiW * roiH)
-        scratch.ensureUInt8(&scratch.out, count: roiW * roiH)
-        scratch.ensureStackCapacity(roiW * 2)
+        Scratch.ensureUInt8(&scratch.strokeMask, count: roiCount)
+        Scratch.ensureUInt8(&scratch.thin, count: roiCount)
+        Scratch.ensureUInt8(&scratch.visited, count: roiCount)
+        Scratch.ensureUInt8(&scratch.temp, count: roiCount)
+        Scratch.ensureUInt8(&scratch.out, count: roiCount)
+        scratch.ensureStackCapacity(max(1024, roiW * 2))
 
         @inline(__always) func idx(_ x: Int, _ y: Int) -> Int { y * width + x }
-        @inline(__always) func ridx(_ x: Int, _ y: Int) -> Int {
-            (y - y0) * roiW + (x - x0)
-        }
+        @inline(__always) func ridx(_ x: Int, _ y: Int) -> Int { (y - y0) * roiW + (x - x0) }
         @inline(__always) func ink(_ x: Int, _ y: Int) -> Bool { binary[idx(x, y)] != 0 }
 
         @inline(__always) func findInkNeighborX(_ baseX: Int, _ y: Int) -> Int? {
@@ -210,9 +266,7 @@ enum VerticalStrokeEraser {
 
         let tStart = CFAbsoluteTimeGetCurrent()
 
-        // ------------------------------------------------------------
-        // PASS 1: long thin vertical runs
-        // ------------------------------------------------------------
+        // PASS 1
         for x in x0...x1 {
             var runStart: Int? = nil
             var runInkCount = 0
@@ -230,9 +284,7 @@ enum VerticalStrokeEraser {
                     let widthLimit = runLen >= longRunThreshold ? Double(maxWidthLong) : Double(maxWidth)
                     if avgW <= widthLimit {
                         for i in 0..<scratch.runPixelsX.count {
-                            let px = scratch.runPixelsX[i]
-                            let py = scratch.runPixelsY[i]
-                            scratch.strokeMask[ridx(px, py)] = 1
+                            scratch.strokeMask[ridx(scratch.runPixelsX[i], scratch.runPixelsY[i])] = 1
                         }
                     }
                 }
@@ -258,16 +310,12 @@ enum VerticalStrokeEraser {
                 }
             }
 
-            if runStart != nil {
-                flushRun(at: y1 + 1)
-            }
+            if runStart != nil { flushRun(at: y1 + 1) }
         }
 
         let tPass1 = CFAbsoluteTimeGetCurrent()
 
-        // ------------------------------------------------------------
-        // PASS 2: thin diagonal/curved components (tails/slurs/ties)
-        // ------------------------------------------------------------
+        // PASS 2
         for y in y0...y1 {
             for x in x0...x1 {
                 if ink(x, y) && localWidthAt(x, y) <= thinWidth {
@@ -282,10 +330,10 @@ enum VerticalStrokeEraser {
 
         for y in y0...y1 {
             for x in x0...x1 {
-                let ri = ridx(x, y)
-                if scratch.thin[ri] == 0 || scratch.visited[ri] != 0 { continue }
+                let ri0 = ridx(x, y)
+                if scratch.thin[ri0] == 0 || scratch.visited[ri0] != 0 { continue }
 
-                scratch.visited[ri] = 1
+                scratch.visited[ri0] = 1
                 scratch.stackX.removeAll(keepingCapacity: true)
                 scratch.stackY.removeAll(keepingCapacity: true)
                 scratch.stackX.append(x)
@@ -299,6 +347,7 @@ enum VerticalStrokeEraser {
                     pixels += 1
                     minX = min(minX, cx); maxX = max(maxX, cx)
                     minY = min(minY, cy); maxY = max(maxY, cy)
+
                     let ri = ridx(cx, cy)
                     if compPixelCount < scratch.compPixels.count {
                         scratch.compPixels[compPixelCount] = ri
@@ -337,9 +386,7 @@ enum VerticalStrokeEraser {
 
         let tPass2 = CFAbsoluteTimeGetCurrent()
 
-        // ------------------------------------------------------------
-        // Dilate stroke mask (inside ROI)
-        // ------------------------------------------------------------
+        // Dilate stroke mask (ROI)
         if dilateR > 0 {
             boxDilateROI(maskROI: &scratch.strokeMask,
                          tempROI: &scratch.temp,
@@ -352,22 +399,20 @@ enum VerticalStrokeEraser {
 
         let tDilate = CFAbsoluteTimeGetCurrent()
 
-        // ------------------------------------------------------------
-        // Apply erase (respect protectMask)
-        // ------------------------------------------------------------
-        var out = binary
+        // Apply erase
+        var outFull = binary
         var erased = 0
         var strokeTotal = 0
 
         for y in y0...y1 {
             let row = y * width
             for x in x0...x1 {
-                let i = row + x
-                let ri = ridx(x, y)
-                if scratch.strokeMask[ri] != 0 {
+                let iFull = row + x
+                let iROI = ridx(x, y)
+                if scratch.strokeMask[iROI] != 0 {
                     strokeTotal += 1
-                    if protectExpandedROI[ri] == 0 && out[i] != 0 {
-                        out[i] = 0
+                    if protectExpandedROI[iROI] == 0 && outFull[iFull] != 0 {
+                        outFull[iFull] = 0
                         erased += 1
                     }
                 }
@@ -376,12 +421,9 @@ enum VerticalStrokeEraser {
 
         let tErase = CFAbsoluteTimeGetCurrent()
 
-        return Result(binaryWithoutStrokes: out,
+        return Result(binaryWithoutStrokes: outFull,
                       strokeMaskROI: scratch.strokeMask,
-                      roiX: x0,
-                      roiY: y0,
-                      roiW: roiW,
-                      roiH: roiH,
+                      roiX: x0, roiY: y0, roiW: roiW, roiH: roiH,
                       erasedCount: erased,
                       totalStrokeCount: strokeTotal,
                       pass1Ms: (tPass1 - tStart) * 1000,

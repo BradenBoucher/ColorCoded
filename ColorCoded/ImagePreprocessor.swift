@@ -2,6 +2,15 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 
 enum ImagePreprocessor {
+
+    // Reuse a single CIContext (creating these repeatedly is expensive).
+    // If you ever need different options, make a second cached context.
+    private static let ctx: CIContext = {
+        CIContext(options: [
+            .useSoftwareRenderer: false
+        ])
+    }()
+
     static func preprocessForContours(_ image: CGImage) -> CGImage? {
         let ci = CIImage(cgImage: image)
 
@@ -19,7 +28,6 @@ enum ImagePreprocessor {
         sharpen.inputImage = exposure.outputImage
         sharpen.sharpness = 0.6
 
-        let ctx = CIContext(options: [.useSoftwareRenderer: false])
         guard let out = sharpen.outputImage else { return nil }
         return ctx.createCGImage(out, from: out.extent)
     }
