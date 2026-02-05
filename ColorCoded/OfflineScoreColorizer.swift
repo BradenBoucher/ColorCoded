@@ -288,6 +288,22 @@ enum OfflineScoreColorizer {
             binary = hres.binaryWithoutHorizontals
         }
 
+        let globalHoriz = HorizontalStrokeEraser.eraseHorizontalRuns(
+            binary: binary,
+            width: w,
+            height: h,
+            roi: CGRect(x: 0, y: 0, width: w, height: h),
+            spacing: spacing,
+            protectMask: protectMask
+        )
+
+        if debugStrokeErase {
+            lastHorizMask = globalHoriz.horizMask
+            print("HorizErase global erased=\(globalHoriz.erasedCount)")
+        }
+
+        binary = globalHoriz.binaryWithoutHorizontals
+
         if debugStrokeErase {
             let u = max(7.0, spacing)
             let sampleStride = max(1, protectRects.count / 30)
