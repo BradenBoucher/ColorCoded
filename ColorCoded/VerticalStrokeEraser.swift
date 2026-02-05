@@ -36,6 +36,7 @@ enum VerticalStrokeEraser {
         let longRunThreshold = Int((3.2 * u).rounded())
         let maxWidthLong = max(4, Int((0.22 * u).rounded()))
         let dilateR = max(1, Int((0.06 * u).rounded()))
+        let protectRadius = max(1, Int((0.25 * u).rounded()))
 
         // Extra pass: diagonal/curved thin components (tails/slurs)
         let thinWidth = max(2, Int((0.12 * u).rounded()))
@@ -60,6 +61,20 @@ enum VerticalStrokeEraser {
 
         @inline(__always) func idx(_ x: Int, _ y: Int) -> Int { y * width + x }
         @inline(__always) func ink(_ x: Int, _ y: Int) -> Bool { binary[idx(x, y)] != 0 }
+        @inline(__always) func protectedNearby(_ x: Int, _ y: Int) -> Bool {
+            if protectRadius <= 0 { return false }
+            let x0 = max(0, x - protectRadius)
+            let x1 = min(width - 1, x + protectRadius)
+            let y0 = max(0, y - protectRadius)
+            let y1 = min(height - 1, y + protectRadius)
+            for yy in y0...y1 {
+                let row = yy * width
+                for xx in x0...x1 {
+                    if protectMask[row + xx] != 0 { return true }
+                }
+            }
+            return false
+        }
 
         @inline(__always) func findInkNeighborX(_ baseX: Int, _ y: Int) -> Int? {
             if ink(baseX, y) { return baseX }
@@ -254,7 +269,7 @@ enum VerticalStrokeEraser {
                 let i = row + x
                 if strokeMask[i] != 0 {
                     strokeTotal += 1
-                    if protectMask[i] == 0 && out[i] != 0 {
+                    if protectMask[i] == 0 && !protectedNearby(x, y) && out[i] != 0 {
                         out[i] = 0
                         erased += 1
                     }
