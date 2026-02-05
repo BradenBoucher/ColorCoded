@@ -295,6 +295,7 @@ enum OfflineScoreColorizer {
             binary = vres.binaryWithoutStrokes
 
             // NEW: horizontal eraser (beams/ties/ledger leftovers)
+            print("✅ about to call HorizontalStrokeEraser")
             let hres = HorizontalStrokeEraser.eraseHorizontalRuns(
                 binary: binary,
                 width: w,
