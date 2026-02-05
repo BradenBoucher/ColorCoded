@@ -1594,7 +1594,7 @@ enum OfflineScoreColorizer {
         let tGrayAlloc = CFAbsoluteTimeGetCurrent()
         var gray = [UInt8](repeating: 0, count: w * h)
         let grayAllocMs = (CFAbsoluteTimeGetCurrent() - tGrayAlloc) * 1000.0
-        log.notice("PERF binaryGrayAllocMs=\(String(format: \"%.1f\", grayAllocMs), privacy: .public)")
+        log.notice("PERF binaryGrayAllocMs=\(String(format: "%.1f", grayAllocMs), privacy: .public)")
 
         let tRender = CFAbsoluteTimeGetCurrent()
         gray.withUnsafeMutableBytes { buf in
@@ -1614,44 +1614,15 @@ enum OfflineScoreColorizer {
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
         }
         let grayRenderMs = (CFAbsoluteTimeGetCurrent() - tRender) * 1000.0
-        log.notice("PERF binaryGrayRenderMs=\(String(format: \"%.1f\", grayRenderMs), privacy: .public)")
+        log.notice("PERF binaryGrayRenderMs=\(String(format: "%.1f", grayRenderMs), privacy: .public)")
 
         let tThreshold = CFAbsoluteTimeGetCurrent()
         var bin = [UInt8](repeating: 0, count: w * h)
-        #if canImport(Accelerate)
-        gray.withUnsafeBytes { srcBytes in
-            bin.withUnsafeMutableBytes { dstBytes in
-                guard let srcBase = srcBytes.baseAddress,
-                      let dstBase = dstBytes.baseAddress else { return }
-                var src = vImage_Buffer(
-                    data: UnsafeMutableRawPointer(mutating: srcBase),
-                    height: vImagePixelCount(h),
-                    width: vImagePixelCount(w),
-                    rowBytes: w
-                )
-                var dst = vImage_Buffer(
-                    data: dstBase,
-                    height: vImagePixelCount(h),
-                    width: vImagePixelCount(w),
-                    rowBytes: w
-                )
-                vImageThreshold_Planar8(
-                    &src,
-                    &dst,
-                    UInt8(lumThreshold),
-                    1,
-                    0,
-                    vImage_Flags(kvImageNoFlags)
-                )
-            }
-        }
-        #else
         for i in 0..<bin.count {
             bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
         }
-        #endif
         let thresholdMs = (CFAbsoluteTimeGetCurrent() - tThreshold) * 1000.0
-        log.notice("PERF binaryThresholdMs=\(String(format: \"%.1f\", thresholdMs), privacy: .public)")
+        log.notice("PERF binaryThresholdMs=\(String(format: "%.1f", thresholdMs), privacy: .public)")
         return (bin, w, h)
     }
 
