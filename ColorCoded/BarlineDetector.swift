@@ -201,3 +201,36 @@ enum BarlineDetector {
         var out = arr
         for i in 0..<arr.count {
             var s = 0
+            var c = 0
+            let a = max(0, i - radius)
+            let b = min(arr.count - 1, i + radius)
+            for j in a...b { s += arr[j]; c += 1 }
+            out[i] = s / max(1, c)
+        }
+        return out
+    }
+
+    private static func mergeNearby(_ items: [ScoredBarline], maxGapPx: CGFloat) -> [ScoredBarline] {
+        guard items.count >= 2 else { return items }
+        let sorted = items.sorted { $0.rect.minX < $1.rect.minX }
+
+        var out: [ScoredBarline] = []
+        out.reserveCapacity(sorted.count)
+
+        var cur = sorted[0]
+        for i in 1..<sorted.count {
+            let nxt = sorted[i]
+            if nxt.rect.minX - cur.rect.maxX <= maxGapPx {
+                // merge
+                let mergedRect = cur.rect.union(nxt.rect)
+                let mergedScore = max(cur.score, nxt.score)
+                cur = ScoredBarline(rect: mergedRect, score: mergedScore)
+            } else {
+                out.append(cur)
+                cur = nxt
+            }
+        }
+        out.append(cur)
+        return out
+    }
+}
