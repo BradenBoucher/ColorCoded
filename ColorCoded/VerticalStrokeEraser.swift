@@ -212,214 +212,88 @@ enum VerticalStrokeEraser {
 
         let u = max(6.0, spacing)
 
-        // Tunables
-        let minRun = max(10, Int((2.2 * u).rounded()))
-        let maxGap = max(1, Int((0.12 * u).rounded()))
-        let maxWidth = max(2, Int((0.15 * u).rounded()))
-        let longRunThreshold = Int((3.2 * u).rounded())
-        let maxWidthLong = max(4, Int((0.22 * u).rounded()))
-        let dilateR = max(1, Int((0.06 * u).rounded()))
-
-        let thinWidth = max(2, Int((0.12 * u).rounded()))
-        let compLongSideMin = max(10, Int((1.15 * u).rounded()))
-        let compShortSideMax = max(3, Int((0.28 * u).rounded()))
-        let compMinPixels = max(18, Int((0.45 * u).rounded()))
+        // Tunables (single-pass run-length eraser)
+        let minRun = max(6, Int((0.55 * u).rounded()))
+        let maxGap = 2
 
         let x0 = roi.x0, y0 = roi.y0, x1 = roi.x1, y1 = roi.y1
         let roiW = roi.roiW, roiH = roi.roiH
         let roiCount = roiW * roiH
 
         Scratch.ensureUInt8(&scratch.strokeMask, count: roiCount)
-        Scratch.ensureUInt8(&scratch.thin, count: roiCount)
-        Scratch.ensureUInt8(&scratch.visited, count: roiCount)
-        Scratch.ensureUInt8(&scratch.temp, count: roiCount)
-        Scratch.ensureUInt8(&scratch.out, count: roiCount)
         scratch.ensureStackCapacity(max(1024, roiW * 2))
 
         @inline(__always) func idx(_ x: Int, _ y: Int) -> Int { y * width + x }
         @inline(__always) func ridx(_ x: Int, _ y: Int) -> Int { (y - y0) * roiW + (x - x0) }
-        @inline(__always) func ink(_ x: Int, _ y: Int) -> Bool { binary[idx(x, y)] != 0 }
-
-        @inline(__always) func findInkNeighborX(_ baseX: Int, _ y: Int) -> Int? {
-            if ink(baseX, y) { return baseX }
-            if baseX > 0 && ink(baseX - 1, y) { return baseX - 1 }
-            if baseX + 1 < width && ink(baseX + 1, y) { return baseX + 1 }
-            return nil
-        }
-
-        @inline(__always) func localWidthAt(_ x: Int, _ y: Int) -> Int {
-            if thinWidth <= 2 {
-                var w = 0
-                if x > 0 && ink(x - 1, y) { w += 1 }
-                if ink(x, y) { w += 1 }
-                if x + 1 < width && ink(x + 1, y) { w += 1 }
-                return w
-            } else {
-                let r = min(2, thinWidth)
-                var w = 0
-                for xx in max(0, x - r)...min(width - 1, x + r) {
-                    if ink(xx, y) { w += 1 }
-                }
-                return w
-            }
-        }
 
         let tStart = CFAbsoluteTimeGetCurrent()
 
-        // PASS 1
-        for x in x0...x1 {
-            var runStart: Int? = nil
-            var runInkCount = 0
-            var runWidthSum = 0
-            var gapCount = 0
-            scratch.runPixelsX.removeAll(keepingCapacity: true)
-            scratch.runPixelsY.removeAll(keepingCapacity: true)
-
-            func flushRun(at yEndExclusive: Int) {
-                guard let ys = runStart else { return }
-                let ye = yEndExclusive
-                let runLen = ye - ys
-                if runLen >= minRun && runInkCount > 0 {
-                    let avgW = Double(runWidthSum) / Double(runInkCount)
-                    let widthLimit = runLen >= longRunThreshold ? Double(maxWidthLong) : Double(maxWidth)
-                    if avgW <= widthLimit {
-                        for i in 0..<scratch.runPixelsX.count {
-                            scratch.strokeMask[ridx(scratch.runPixelsX[i], scratch.runPixelsY[i])] = 1
-                        }
-                    }
-                }
-                runStart = nil
-                runInkCount = 0
-                runWidthSum = 0
-                gapCount = 0
-            }
-
-            for y in y0...y1 {
-                if let nx = (runStart != nil ? findInkNeighborX(x, y) : (ink(x, y) ? x : nil)) {
-                    if runStart == nil { runStart = y }
-                    runInkCount += 1
-                    runWidthSum += localWidthAt(nx, y)
-                    gapCount = 0
-                    scratch.runPixelsX.append(nx)
-                    scratch.runPixelsY.append(y)
-                } else if runStart != nil {
-                    gapCount += 1
-                    if gapCount > maxGap {
-                        flushRun(at: y - gapCount + 1)
-                    }
-                }
-            }
-
-            if runStart != nil { flushRun(at: y1 + 1) }
-        }
-
-        let tPass1 = CFAbsoluteTimeGetCurrent()
-
-        // PASS 2
-        for y in y0...y1 {
-            for x in x0...x1 {
-                if ink(x, y) && localWidthAt(x, y) <= thinWidth {
-                    scratch.thin[ridx(x, y)] = 1
-                }
-            }
-        }
-
-        let neighbor8 = [(-1,-1),(0,-1),(1,-1),
-                         (-1, 0),       (1, 0),
-                         (-1, 1),(0, 1),(1, 1)]
-
-        for y in y0...y1 {
-            for x in x0...x1 {
-                let ri0 = ridx(x, y)
-                if scratch.thin[ri0] == 0 || scratch.visited[ri0] != 0 { continue }
-
-                scratch.visited[ri0] = 1
-                scratch.stackX.removeAll(keepingCapacity: true)
-                scratch.stackY.removeAll(keepingCapacity: true)
-                scratch.stackX.append(x)
-                scratch.stackY.append(y)
-
-                var minX = x, maxX = x, minY = y, maxY = y
-                var pixels = 0
-                var compPixelCount = 0
-
-                while let cx = scratch.stackX.popLast(), let cy = scratch.stackY.popLast() {
-                    pixels += 1
-                    minX = min(minX, cx); maxX = max(maxX, cx)
-                    minY = min(minY, cy); maxY = max(maxY, cy)
-
-                    let ri = ridx(cx, cy)
-                    if compPixelCount < scratch.compPixels.count {
-                        scratch.compPixels[compPixelCount] = ri
-                    } else {
-                        scratch.compPixels.append(ri)
-                    }
-                    compPixelCount += 1
-
-                    for (dx, dy) in neighbor8 {
-                        let nx = cx + dx
-                        let ny = cy + dy
-                        if nx < x0 || nx > x1 || ny < y0 || ny > y1 { continue }
-                        let ni = ridx(nx, ny)
-                        if scratch.thin[ni] != 0 && scratch.visited[ni] == 0 {
-                            scratch.visited[ni] = 1
-                            scratch.stackX.append(nx)
-                            scratch.stackY.append(ny)
-                        }
-                    }
-                }
-
-                if pixels < compMinPixels { continue }
-
-                let bboxW = maxX - minX + 1
-                let bboxH = maxY - minY + 1
-                let longSide = max(bboxW, bboxH)
-                let shortSide = min(bboxW, bboxH)
-
-                if longSide >= compLongSideMin && shortSide <= compShortSideMax {
-                    for i in 0..<compPixelCount {
-                        scratch.strokeMask[scratch.compPixels[i]] = 1
-                    }
-                }
-            }
-        }
-
-        let tPass2 = CFAbsoluteTimeGetCurrent()
-
-        // Dilate stroke mask (ROI)
-        if dilateR > 0 {
-            boxDilateROI(maskROI: &scratch.strokeMask,
-                         tempROI: &scratch.temp,
-                         outROI: &scratch.out,
-                         roiW: roiW,
-                         roiH: roiH,
-                         radiusX: 1,
-                         radiusY: dilateR + 1)
-        }
-
-        let tDilate = CFAbsoluteTimeGetCurrent()
-
-        // Apply erase
         var outFull = binary
         var erased = 0
         var strokeTotal = 0
 
-        for y in y0...y1 {
-            let row = y * width
-            for x in x0...x1 {
-                let iFull = row + x
-                let iROI = ridx(x, y)
-                if scratch.strokeMask[iROI] != 0 {
-                    strokeTotal += 1
-                    if protectExpandedROI[iROI] == 0 && outFull[iFull] != 0 {
-                        outFull[iFull] = 0
-                        erased += 1
+        for x in x0...x1 {
+            var runStart: Int? = nil
+            var lastInkY = y0
+            var gapCount = 0
+
+            func flushRun() {
+                guard let ys = runStart else { return }
+                let ye = lastInkY
+                let runLen = ye - ys + 1
+                guard runLen >= minRun else {
+                    runStart = nil
+                    gapCount = 0
+                    return
+                }
+
+                let xLeft = max(x0, x - 1)
+                let xRight = min(x1, x + 1)
+
+                for yy in ys...ye {
+                    let fullRow = yy * width
+                    let roiRow = (yy - y0) * roiW
+                    for xx in xLeft...xRight {
+                        let iFull = fullRow + xx
+                        let iROI = roiRow + (xx - x0)
+                        if binary[iFull] == 0 { continue }
+                        if scratch.strokeMask[iROI] == 0 {
+                            scratch.strokeMask[iROI] = 1
+                            strokeTotal += 1
+                        }
+                        if protectExpandedROI[iROI] == 0 && outFull[iFull] != 0 {
+                            outFull[iFull] = 0
+                            erased += 1
+                        }
                     }
                 }
+
+                runStart = nil
+                gapCount = 0
+            }
+
+            var y = y0
+            while y <= y1 {
+                let iFull = y * width + x
+                if binary[iFull] != 0 {
+                    if runStart == nil { runStart = y }
+                    lastInkY = y
+                    gapCount = 0
+                } else if runStart != nil {
+                    gapCount += 1
+                    if gapCount > maxGap {
+                        flushRun()
+                    }
+                }
+                y += 1
+            }
+
+            if runStart != nil {
+                flushRun()
             }
         }
 
-        let tErase = CFAbsoluteTimeGetCurrent()
+        let tPass1 = CFAbsoluteTimeGetCurrent()
 
         return Result(binaryWithoutStrokes: outFull,
                       strokeMaskROI: scratch.strokeMask,
@@ -427,8 +301,8 @@ enum VerticalStrokeEraser {
                       erasedCount: erased,
                       totalStrokeCount: strokeTotal,
                       pass1Ms: (tPass1 - tStart) * 1000,
-                      pass2Ms: (tPass2 - tPass1) * 1000,
-                      strokeDilateMs: (tDilate - tPass2) * 1000,
-                      eraseLoopMs: (tErase - tDilate) * 1000)
+                      pass2Ms: 0,
+                      strokeDilateMs: 0,
+                      eraseLoopMs: 0)
     }
 }
