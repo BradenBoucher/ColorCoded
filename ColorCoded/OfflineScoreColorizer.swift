@@ -220,7 +220,6 @@ enum OfflineScoreColorizer {
                                            systems: [SystemBlock],
                                            protectRects: [CGRect]) -> CleanedStrokeResult? {
         _ = HorizontalStrokeEraser.self
-        print("✅ buildStrokeCleaned entered")
         let (bin, w, h) = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         var binary = bin
 
