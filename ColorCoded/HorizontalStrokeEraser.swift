@@ -28,12 +28,12 @@ enum HorizontalStrokeEraser {
 
         let u = max(7.0, spacing)
 
-        // Tunables (safe defaults)
-        let minRun = max(16, Int((1.8 * u).rounded()))           // "long"
-        let minCurveRun = max(12, Int((1.2 * u).rounded()))      // allow mild curvature
-        let maxThickness = max(1, Int((0.18 * u).rounded()))     // "thin band"
+        // Tunables (ties/slurs only)
+        let minRun = max(16, Int((5.0 * u).rounded()))           // require long runs
+        let minCurveRun = max(12, Int((3.5 * u).rounded()))      // allow mild curvature
+        let maxThickness = max(1, Int((0.08 * u).rounded()))     // strict thickness cutoff
         let protectMaxFrac: Double = 0.08                        // don't erase if too protected
-        let tieBand = max(1, Int((0.12 * u).rounded()))
+        let tieBand = max(1, Int((0.10 * u).rounded()))
         let staffExclusion = spacing * 0.18
 
         let clipped = roi.intersection(CGRect(x: 0, y: 0, width: width, height: height))
@@ -70,6 +70,38 @@ enum HorizontalStrokeEraser {
             return t
         }
 
+        func isStraightRun(runStart: Int, runEnd: Int, y: Int) -> Bool {
+            let sampleCount = 6
+            let band = max(1, maxThickness + 1)
+            let span = max(1, runEnd - runStart)
+            let step = max(1, span / (sampleCount + 1))
+            var centroids: [Double] = []
+            centroids.reserveCapacity(sampleCount)
+
+            var x = runStart + step
+            while x < runEnd && centroids.count < sampleCount {
+                var sumY = 0
+                var count = 0
+                let yMin = max(0, y - band * 2)
+                let yMax = min(height - 1, y + band * 2)
+                for yy in yMin...yMax {
+                    if out[yy * width + x] != 0 {
+                        sumY += yy
+                        count += 1
+                    }
+                }
+                if count > 0 {
+                    centroids.append(Double(sumY) / Double(count))
+                }
+                x += step
+            }
+
+            guard centroids.count >= 3 else { return false }
+            let minC = centroids.min() ?? 0
+            let maxC = centroids.max() ?? 0
+            return (maxC - minC) <= 1.0
+        }
+
         for y in y0..<y1 {
             if distanceToNearestStaffLine(y: y) < staffExclusion {
                 continue
@@ -104,6 +136,7 @@ enum HorizontalStrokeEraser {
                 let protectFrac = Double(protectHits) / Double(max(1, inkSamples))
 
                 let isThin = maxT <= (2 * maxThickness + 1)
+                let isStraight = isStraightRun(runStart: runStart, runEnd: runEnd, y: y)
 
                 var isCurvedBand = false
                 if runLen >= minCurveRun && isThin {
@@ -128,7 +161,7 @@ enum HorizontalStrokeEraser {
                     isCurvedBand = bandFrac >= 0.65
                 }
 
-                let qualifies = runLen >= minRun || isCurvedBand
+                let qualifies = (runLen >= minRun || isCurvedBand) && !isStraight
 
                 // Erase if thin and not protected (extra guard near staff lines)
                 if qualifies && isThin && protectFrac <= protectMaxFrac {
