@@ -1635,17 +1635,15 @@ enum OfflineScoreColorizer {
                     width: vImagePixelCount(w),
                     rowBytes: w
                 )
-                var table = [Pixel_8](repeating: 0, count: 256)
-                let threshold = Int(UInt8(clamping: lumThreshold))
-                if threshold > 0 {
-                    for value in 0..<threshold {
-                        table[value] = 1
-                    }
-                }
-                let err = vImageTableLookUp_Planar8(
+                let thresh = Pixel_8(clamping: lumThreshold)
+                let maxVal: Pixel_8 = 1
+                let minVal: Pixel_8 = 0
+                let err = vImageThreshold_Planar8(
                     &src,
                     &dst,
-                    &table,
+                    thresh,
+                    maxVal,
+                    minVal,
                     vImage_Flags(kvImageNoFlags)
                 )
                 if err != kvImageNoError {
