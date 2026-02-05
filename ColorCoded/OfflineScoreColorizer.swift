@@ -219,7 +219,7 @@ enum OfflineScoreColorizer {
                                            spacing: CGFloat,
                                            systems: [SystemBlock],
                                            protectRects: [CGRect]) -> CleanedStrokeResult? {
-
+        _ = HorizontalStrokeEraser.self
         let (bin, w, h) = buildBinaryInkMap(from: cgImage, lumThreshold: 175)
         var binary = bin
 
