@@ -25,9 +25,9 @@ enum HorizontalStrokeEraser {
         let u = max(7.0, spacing)
 
         // Tunables (safe defaults)
-        let minRun = max(12, Int((1.4 * u).rounded()))           // "long"
-        let maxThickness = max(1, Int((0.24 * u).rounded()))     // "thin band"
-        let protectMaxFrac: Double = 0.05                        // don't erase if too protected
+        let minRun = max(16, Int((1.8 * u).rounded()))           // "long"
+        let maxThickness = max(1, Int((0.18 * u).rounded()))     // "thin band"
+        let protectMaxFrac: Double = 0.08                        // don't erase if too protected
 
         let clipped = roi.intersection(CGRect(x: 0, y: 0, width: width, height: height))
         guard clipped.width > 2, clipped.height > 2 else {
@@ -75,13 +75,13 @@ enum HorizontalStrokeEraser {
                 var inkSamples = 0
                 var maxT = 0
 
-                let sampleStep = runLen < minRun * 2 ? 1 : 2
+                // sample every 2 px for speed
                 var sx = runStart
                 while sx < runEnd {
                     inkSamples += 1
                     if protectMask[y * width + sx] != 0 { protectHits += 1 }
                     maxT = max(maxT, columnThicknessAt(x: sx, y: y))
-                    sx += sampleStep
+                    sx += 2
                 }
 
                 let protectFrac = Double(protectHits) / Double(max(1, inkSamples))
