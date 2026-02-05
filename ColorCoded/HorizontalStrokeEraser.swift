@@ -23,9 +23,6 @@ enum HorizontalStrokeEraser {
     ) -> Result {
         log.notice("eraseHorizontalRuns enter roi=\(String(describing: roi), privacy: .public)")
 
-        var out = binary
-        var mask = [UInt8](repeating: 0, count: width * height)
-
         let u = max(7.0, spacing)
 
         // Tunables (ties/slurs only)
@@ -38,7 +35,7 @@ enum HorizontalStrokeEraser {
 
         let clipped = roi.intersection(CGRect(x: 0, y: 0, width: width, height: height))
         guard clipped.width > 2, clipped.height > 2 else {
-            return Result(binaryWithoutHorizontals: out, horizMask: mask, erasedCount: 0)
+            return Result(binaryWithoutHorizontals: binary, horizMask: [], erasedCount: 0)
         }
 
         let x0 = max(0, Int(floor(clipped.minX)))
@@ -46,6 +43,38 @@ enum HorizontalStrokeEraser {
         let x1 = min(width, Int(ceil(clipped.maxX)))
         let y1 = min(height, Int(ceil(clipped.maxY)))
 
+        let sampleStep = 4
+        let gateThreshold = minRun
+        var foundRun = false
+
+        if (x1 - x0) > 0 && (y1 - y0) > 0 {
+            var y = y0
+            while y < y1 && !foundRun {
+                var x = x0
+                var run = 0
+                while x < x1 {
+                    if binary[y * width + x] != 0 {
+                        run += sampleStep
+                        if run >= gateThreshold {
+                            foundRun = true
+                            break
+                        }
+                    } else {
+                        run = 0
+                    }
+                    x += sampleStep
+                }
+                y += sampleStep
+            }
+        }
+
+        if !foundRun {
+            log.notice("eraseHorizontalRuns skipped roi=\(String(describing: roi), privacy: .public)")
+            return Result(binaryWithoutHorizontals: binary, horizMask: [], erasedCount: 0)
+        }
+
+        var out = binary
+        var mask = [UInt8](repeating: 0, count: width * height)
         var erased = 0
 
         @inline(__always)
