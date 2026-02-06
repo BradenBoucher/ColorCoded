@@ -11,26 +11,48 @@ enum NoteheadDetector {
     /// Production: just notehead rects
     static func detectNoteheads(
         in image: PlatformImage,
-        contoursBinaryOverride: ([UInt8], Int, Int)? = nil
+        contoursBinaryOverride: ([UInt8], Int, Int)? = nil,
+        systems: [SystemBlock]? = nil
     ) async -> [CGRect] {
-        let result = await detectDebug(in: image, contoursBinaryOverride: contoursBinaryOverride)
+        let result = await detectDebug(
+            in: image,
+            contoursBinaryOverride: contoursBinaryOverride,
+            systems: systems
+        )
         return result.noteRects
     }
 
     /// Debug: noteheads + staff rectangles (treble/bass systems).
     static func detectDebug(
         in image: PlatformImage,
-        contoursBinaryOverride: ([UInt8], Int, Int)? = nil
+        contoursBinaryOverride: ([UInt8], Int, Int)? = nil,
+        systems: [SystemBlock]? = nil
     ) async -> (noteRects: [CGRect], staffRects: [CGRect]) {
 
         if let (binary, width, height) = contoursBinaryOverride {
             let cclStart = CFAbsoluteTimeGetCurrent()
-            let components = BinaryConnectedComponents.label(
-                binary: binary,
-                width: width,
-                height: height,
-                roi: nil
-            )
+            let imgRect = CGRect(x: 0, y: 0, width: width, height: height)
+            let systemBlocks = systems ?? []
+            let rois: [CGRect] = systemBlocks.isEmpty
+                ? [imgRect]
+                : systemBlocks.map { system in
+                    let expand = max(6.0, system.spacing * 1.5)
+                    return system.bbox.insetBy(dx: -expand, dy: -expand).intersection(imgRect)
+                }
+
+            var scratch = BinaryConnectedComponents.Scratch()
+            var components: [BinaryConnectedComponents.Component] = []
+            components.reserveCapacity(512)
+            for roi in rois {
+                let roiComponents = BinaryConnectedComponents.label(
+                    binary: binary,
+                    width: width,
+                    height: height,
+                    roi: roi,
+                    scratch: &scratch
+                )
+                components.append(contentsOf: roiComponents)
+            }
             let cclMs = (CFAbsoluteTimeGetCurrent() - cclStart) * 1000.0
             log.notice("PERF cclMs=\(String(format: "%.1f", cclMs), privacy: .public)")
 
