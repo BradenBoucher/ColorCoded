@@ -19,7 +19,7 @@ enum HeadDecision: String {
 /// - shapeScore = notehead-likeness (geometry + ink + vertical-stroke penalty)
 /// - compositeScore = what we rank/suppress on
 struct ScoredHead {
-    let rect: CGRect
+    var rect: CGRect
 
     // Staff-fit metadata
     var clef: ClefKind?
@@ -30,6 +30,7 @@ struct ScoredHead {
     var inkExtent: CGFloat?          // 0..1
     var strokeOverlap: CGFloat?      // 0..1 (vertical runs)
     var shapeScore: CGFloat = 0      // 0..1
+    var isHeadLike: Bool = false
 
     // Optional debug state
     var decision: HeadDecision = .kept
