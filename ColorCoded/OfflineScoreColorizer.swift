@@ -140,19 +140,30 @@ enum OfflineScoreColorizer {
                         let systemsStart = CFAbsoluteTimeGetCurrent()
                         let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
                         let systemsMs = (CFAbsoluteTimeGetCurrent() - systemsStart) * 1000.0
-
+//
+                        //
+                        //
+                        //
+                        //
+                        //
+                        //
+                        //
                         let protectStart = CFAbsoluteTimeGetCurrent()
-                        let noteRects = await NoteheadDetector.detectNoteheads(in: image)
+
+                        // Pass 1: protectRects on original image (cheap + keeps recall)
+                        let protectNoteRects = await NoteheadDetector.detectNoteheads(in: image)
                         let protectDetectMs = (CFAbsoluteTimeGetCurrent() - protectStart) * 1000.0
                         log.notice("PERF protectDetectMs=\(String(format: "%.1f", protectDetectMs), privacy: .public)")
 
                         // Build stroke-cleaned image AND keep the cleaned binary.
                         debugMaskData = nil
                         let strokeStart = CFAbsoluteTimeGetCurrent()
-                        let cleaned = await buildStrokeCleaned(baseImage: image,
-                                                              staffModel: staffModel,
-                                                              systems: systems,
-                                                              protectRects: noteRects)
+                        let cleaned = await buildStrokeCleaned(
+                            baseImage: image,
+                            staffModel: staffModel,
+                            systems: systems,
+                            protectRects: protectNoteRects
+                        )
                         let strokeMs = (CFAbsoluteTimeGetCurrent() - strokeStart) * 1000.0
                         log.notice("PERF strokeMs=\(String(format: "%.1f", strokeMs), privacy: .public)")
                         if cleaned == nil {
@@ -162,6 +173,29 @@ enum OfflineScoreColorizer {
                         let cleanedBinary = cleaned?.binaryPage
                         let rawBinary = cleaned?.binaryRaw
                         log.notice("systems.count=\(systems.count, privacy: .public) cleaned!=nil=\(cleaned != nil, privacy: .public) override!=nil=\(cleanedBinary != nil, privacy: .public)")
+
+                        // Pass 2: do contours on binary (MUCH more stable). Fallback if it gets too aggressive.
+                        let contourStart = CFAbsoluteTimeGetCurrent()
+                        let contourCG = cleanedBinary ?? rawBinary ?? image.cgImageSafe
+
+                        var noteRects = protectNoteRects
+                        if let contourCG {
+                            let pass2 = await NoteheadDetector.detectNoteheads(in: image, contoursCGOverride: contourCG)
+                            // If it looks like we under-detected, retry on raw binary if available
+                            if pass2.count >= 200 {
+                                noteRects = pass2
+                            } else if let rb = rawBinary {
+                                noteRects = await NoteheadDetector.detectNoteheads(in: image, contoursCGOverride: rb)
+                            }
+                        }
+                        let contourMs = (CFAbsoluteTimeGetCurrent() - contourStart) * 1000.0
+                        log.notice("PERF contoursMs=\(String(format: "%.1f", contourMs), privacy: .public)")
+
+                        // High recall note candidates
+                        let detection = NoteDetectionDebug(noteRects: noteRects)
+                        let debugDetectMs = 0.0
+                        log.notice("PERF debugDetectMs=\(String(format: "%.1f", debugDetectMs), privacy: .public)")
+
 
                         // High recall note candidates
                         let detection = NoteDetectionDebug(noteRects: noteRects)
@@ -1618,12 +1652,19 @@ enum OfflineScoreColorizer {
 
         let tThreshold = CFAbsoluteTimeGetCurrent()
         var bin = [UInt8](repeating: 0, count: w * h)
+
+        // If Accelerate succeeds, we flip this to false.
         var needsFallback = true
+
         #if canImport(Accelerate)
+        // Use vImageTableLookUp to map gray -> {0,1} in one vectorized pass.
+        var vImageErr: vImage_Error = kvImageNoError
+
         gray.withUnsafeBytes { grayBuf in
             bin.withUnsafeMutableBytes { binBuf in
                 guard let grayBase = grayBuf.baseAddress,
                       let binBase = binBuf.baseAddress else { return }
+
                 var src = vImage_Buffer(
                     data: UnsafeMutableRawPointer(mutating: grayBase),
                     height: vImagePixelCount(h),
@@ -1636,35 +1677,48 @@ enum OfflineScoreColorizer {
                     width: vImagePixelCount(w),
                     rowBytes: w
                 )
+
                 let thresh = Pixel_8(clamping: lumThreshold)
+
+                // Lookup table: values < thresh => 1 else 0
                 var table = [UInt8](repeating: 0, count: 256)
                 for i in 0..<256 {
-                    table[i] = i < Int(thresh) ? 1 : 0
+                    table[i] = (i < Int(thresh)) ? 1 : 0
                 }
-                let err = vImageTableLookUp_Planar8(
+
+                vImageErr = vImageTableLookUp_Planar8(
                     &src,
                     &dst,
                     table,
                     vImage_Flags(kvImageNoFlags)
                 )
-                thresholdErr = err
             }
         }
-        if thresholdErr != kvImageNoError {
-            for i in 0..<bin.count {
-                bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
-            }
+
+        if vImageErr == kvImageNoError {
+            needsFallback = false
+        } else {
+            log.warning("vImageTableLookUp_Planar8 failed err=\(vImageErr, privacy: .public) -> fallback threshold")
         }
         #endif
+
+        // Scalar fallback (also used when Accelerate is unavailable)
         if needsFallback {
+            // NOTE: bin is already allocated; fill it in place.
             for i in 0..<bin.count {
                 bin[i] = (Int(gray[i]) < lumThreshold) ? 1 : 0
             }
         }
+
         let thresholdMs = (CFAbsoluteTimeGetCurrent() - tThreshold) * 1000.0
         log.notice("PERF binaryThresholdMs=\(String(format: "%.1f", thresholdMs), privacy: .public)")
+
+        let buildMs = (CFAbsoluteTimeGetCurrent() - tGrayAlloc) * 1000.0
+        log.notice("PERF binaryBuildMs=\(String(format: "%.1f", buildMs), privacy: .public)")
+
         return (bin, w, h)
     }
+
 
     private static func rectInkExtent(_ rect: CGRect, bin: [UInt8], pageW: Int, pageH: Int) -> CGFloat {
         let clipped = rect.intersection(CGRect(x: 0, y: 0, width: pageW, height: pageH))
@@ -1833,4 +1887,33 @@ enum OfflineScoreColorizer {
         let length = max(1.0, Double(max(clipped.width, clipped.height)))
         return Double(ink) / length
     }
+    func cgImageFromBinary(
+        _ binary: ([UInt8], Int, Int)
+    ) -> CGImage? {
+        let (pixels, width, height) = binary
+
+        let bytesPerRow = width
+        let colorSpace = CGColorSpaceCreateDeviceGray()
+
+        return pixels.withUnsafeBytes { ptr in
+            guard let provider = CGDataProvider(
+                data: NSData(bytes: ptr.baseAddress!, length: pixels.count)
+            ) else { return nil }
+
+            return CGImage(
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bitsPerPixel: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: false,
+                intent: .defaultIntent
+            )
+        }
+    }
+
 }

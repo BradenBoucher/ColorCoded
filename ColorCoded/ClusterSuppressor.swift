@@ -2,44 +2,70 @@ import CoreGraphics
 import Foundation
 
 enum ClusterSuppressor {
+
     static func suppress(_ candidates: [ScoredHead], spacing: CGFloat) -> [ScoredHead] {
         guard !candidates.isEmpty else { return [] }
 
-        // Sort by best candidates first.
-        // Use gateScore (more meaningful than `score` if you changed scoring logic)
-        let sorted = candidates.sorted(by: { (a: ScoredHead, b: ScoredHead) -> Bool in
-            a.gateScore > b.gateScore
-        })
+        // Prefer best overall (staff-fit + shape), not just gate.
+        let sorted = candidates.sorted { a, b in
+            if a.compositeScore != b.compositeScore { return a.compositeScore > b.compositeScore }
+            // deterministic tie-breakers reduce "identical rows treated differently"
+            if a.rect.midX != b.rect.midX { return a.rect.midX < b.rect.midX }
+            return a.rect.midY < b.rect.midY
+        }
 
         var kept: [ScoredHead] = []
         kept.reserveCapacity(sorted.count)
 
-        let dxThresh = spacing * 0.35
-        let dyThresh = spacing * 0.35
-        let chordDyThresh = spacing * 0.30
+        // Close-in-X = same "time slice"
+        let dxThresh = spacing * 0.42
+
+        // Very tight Y = truly duplicate, not a chord
+        let dupDyThresh = spacing * 0.12
+
+        // If step indices exist, allow chords: stacked notes differ by >= 2 steps typically
+        let minChordStepDiff = 2
 
         for cand in sorted {
-            let center = CGPoint(x: cand.rect.midX, y: cand.rect.midY)
-            var shouldKeep = true
+            let cx = cand.rect.midX
+            let cy = cand.rect.midY
 
+            var keep = true
             for k in kept {
-                let kc = CGPoint(x: k.rect.midX, y: k.rect.midY)
-                let dx = abs(center.x - kc.x)
-                let dy = abs(center.y - kc.y)
+                let kx = k.rect.midX
+                let ky = k.rect.midY
 
-                guard dx < dxThresh && dy < dyThresh else { continue }
+                let dx = abs(cx - kx)
+                if dx > dxThresh { continue }
 
-                // Suppress if same step OR almost same y (but keep chord stacks)
-                let sameStep = (cand.staffStepIndex != nil && cand.staffStepIndex == k.staffStepIndex)
-                let shouldSuppress = dy < chordDyThresh || sameStep
+                let dy = abs(cy - ky)
 
-                if shouldSuppress {
-                    shouldKeep = false
-                    break
+                // If both have step indices, only suppress when they represent the SAME step
+                if let s1 = cand.staffStepIndex, let s2 = k.staffStepIndex {
+                    if s1 == s2 {
+                        keep = false
+                        break
+                    }
+                    // If they're different steps enough, it's probably a chord stack -> keep
+                    if abs(s1 - s2) >= minChordStepDiff {
+                        continue
+                    }
+                    // Small step diff (0 or 1) can still be a duplicate or a tight cluster.
+                    // Use very-tight dy to suppress only true duplicates.
+                    if dy < dupDyThresh {
+                        keep = false
+                        break
+                    }
+                } else {
+                    // No step info: suppress only if extremely close in Y (duplicate), not just "near"
+                    if dy < dupDyThresh {
+                        keep = false
+                        break
+                    }
                 }
             }
 
-            if shouldKeep { kept.append(cand) }
+            if keep { kept.append(cand) }
         }
 
         return kept

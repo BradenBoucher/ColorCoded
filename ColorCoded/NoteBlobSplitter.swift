@@ -5,7 +5,7 @@ enum NoteBlobSplitter {
     /// Split a candidate rect into multiple rects if multiple "ink peaks" exist.
     /// Stem-aware version:
     /// - Rejects thin peaks (stems/barlines) so we don't create "note towers"
-    /// - Detects dominant vertical runs and avoids splitting in those regions
+    /// - Suppresses splitting through dense beam rows
     /// - Still allows stacked triads / close chords
     static func splitIfNeeded(rect: CGRect, cg: CGImage, maxSplits: Int = 6) -> [CGRect] {
 
@@ -37,8 +37,7 @@ enum NoteBlobSplitter {
         // Slightly high threshold catches hollow + filled heads without requiring perfect binarization.
         let threshold = 180
 
-        // If the crop is basically a vertical stroke (barline/stem), DO NOT split it into "noteheads".
-        // This avoids towers that later snap to many staff steps.
+        // If this crop is basically a vertical stroke (barline/stem/tail), DO NOT split it.
         if isDominantVerticalStroke(pixels: pixels, w: w, h: h, threshold: threshold) {
             return [croppedRect]
         }
@@ -65,7 +64,7 @@ enum NoteBlobSplitter {
         )
         if tallResult.count >= 2 { return tallResult }
 
-        // Fallback forced split (still stem-aware via the early veto)
+        // Fallback forced split (still stem-aware via early veto)
         let ar = croppedRect.width / max(1, croppedRect.height)
 
         let minDim = min(croppedRect.width, croppedRect.height)
@@ -123,16 +122,18 @@ enum NoteBlobSplitter {
         let rowMax = rowInk.max() ?? 0
         let beamRowMin = Int(Double(rowMax) * 0.80)
 
-        // band
+        // ignore top/bottom margins
         let y0 = Int(Double(h) * 0.06)
         let y1 = Int(Double(h) * 0.94)
 
         // Column projection with beam suppression
         var colInk = [Int](repeating: 0, count: w)
-        for y in y0..<y1 {
-            if rowInk[y] >= beamRowMin { continue }
-            for x in 0..<w {
-                if isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold) { colInk[x] += 1 }
+        if y1 > y0 {
+            for y in y0..<y1 {
+                if rowInk[y] >= beamRowMin { continue } // skip beams / thick staff regions
+                for x in 0..<w {
+                    if isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold) { colInk[x] += 1 }
+                }
             }
         }
 
@@ -152,13 +153,13 @@ enum NoteBlobSplitter {
         var peaks = findPeaks(sm, peakMin: peakMin, length: w)
 
         // 2) reject peaks that are "too thin" (usually stem fragments)
-        let minPeakWidth = max(3, Int(Double(w) * 0.06)) // ~6% of crop width, clamped
-        peaks = peaks.filter { peak in
-            let width = peakSupportWidth(arr: sm, center: peak, cutoff: max(1, Int(Double(peakMin) * 0.55)))
+        let minPeakWidth = max(3, Int(Double(w) * 0.06)) // ~6% of crop width
+        peaks = peaks.filter { center in
+            let width = peakSupportWidth(arr: sm, center: center, cutoff: max(1, Int(Double(peakMin) * 0.55)))
             return width >= minPeakWidth
         }
 
-        // 3) dedupe a little (but not too much, to preserve close noteheads)
+        // 3) dedupe lightly (keep close noteheads)
         peaks = dedupePeaks(peaks, minDistance: max(2, Int(Double(w) * 0.045)))
 
         if peaks.count >= 2 {
@@ -173,7 +174,7 @@ enum NoteBlobSplitter {
         guard !peakCols.isEmpty else { return [rect] }
 
         // width per head ~ rect.height (clamped)
-        let estW = max(10.0, min(rect.height * 0.98, rect.width / CGFloat(peakCols.count)))
+        let estW = max(10.0, min(rect.height * 0.98, rect.width / CGFloat(max(1, peakCols.count))))
 
         var out: [CGRect] = []
         out.reserveCapacity(peakCols.count)
@@ -209,9 +210,10 @@ enum NoteBlobSplitter {
         // Only attempt if plausibly tall
         if croppedRect.height < croppedRect.width * 1.15 { return [croppedRect] }
 
-        // Ignore left/right band to reduce stems / barlines influence
+        // Ignore left/right band to reduce stems/barlines influence
         let x0 = Int(Double(w) * 0.20)
         let x1 = Int(Double(w) * 0.80)
+        if x1 <= x0 { return [croppedRect] }
 
         var rowInk = [Int](repeating: 0, count: h)
         for y in 0..<h {
@@ -236,10 +238,10 @@ enum NoteBlobSplitter {
 
         var peaks = findPeaks(sm, peakMin: peakMin, length: h)
 
-        // Reject peaks that are too thin in Y-support (often from noise / tiny marks)
+        // Reject peaks that are too thin in Y-support (often noise/tiny marks)
         let minPeakHeight = max(3, Int(Double(h) * 0.06))
-        peaks = peaks.filter { peak in
-            let height = peakSupportWidth(arr: sm, center: peak, cutoff: max(1, Int(Double(peakMin) * 0.55)))
+        peaks = peaks.filter { center in
+            let height = peakSupportWidth(arr: sm, center: center, cutoff: max(1, Int(Double(peakMin) * 0.55)))
             return height >= minPeakHeight
         }
 
@@ -257,7 +259,7 @@ enum NoteBlobSplitter {
         guard !peakRows.isEmpty else { return [rect] }
 
         // height per head ~ rect.width (clamped)
-        let estH = max(10.0, min(rect.width * 1.05, rect.height / CGFloat(peakRows.count)))
+        let estH = max(10.0, min(rect.width * 1.05, rect.height / CGFloat(max(1, peakRows.count))))
 
         var out: [CGRect] = []
         out.reserveCapacity(peakRows.count)
@@ -282,7 +284,6 @@ enum NoteBlobSplitter {
     // MARK: - Stem / barline veto
 
     /// Returns true if this crop behaves like a mostly-vertical stroke region.
-    /// This is a *very* common source of "bunched" false notes.
     private static func isDominantVerticalStroke(pixels: [UInt8], w: Int, h: Int, threshold: Int) -> Bool {
         guard w >= 6, h >= 10 else { return false }
 
@@ -321,14 +322,8 @@ enum NoteBlobSplitter {
         let centerFrac = Double(centerInk) / Double(totalInk)
         let runFrac = Double(maxRun) / Double(h)
 
-        // Heuristic:
-        // - A long vertical run through the center,
-        // - AND ink concentrated near the center columns,
-        // strongly implies stem/barline/tail chunk.
-        if runFrac > 0.72 && centerFrac > 0.52 {
-            return true
-        }
-
+        // long vertical run + ink concentrated in center => stem/barline/tail chunk
+        if runFrac > 0.72 && centerFrac > 0.52 { return true }
         return false
     }
 
@@ -340,7 +335,6 @@ enum NoteBlobSplitter {
         var i = 1
         while i < length - 1 {
             if arr[i] >= peakMin, arr[i] >= arr[i - 1], arr[i] >= arr[i + 1] {
-
                 // plateau -> choose center
                 var l = i
                 var r = i
@@ -356,7 +350,6 @@ enum NoteBlobSplitter {
     }
 
     /// How wide (in indices) is the peak above cutoff around a center.
-    /// This lets us reject skinny stem peaks.
     private static func peakSupportWidth(arr: [Int], center: Int, cutoff: Int) -> Int {
         guard !arr.isEmpty else { return 0 }
         let n = arr.count
