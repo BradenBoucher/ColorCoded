@@ -1,8 +1,10 @@
 import Foundation
 @preconcurrency import Vision
 import CoreGraphics
+import OSLog
 
 enum NoteheadDetector {
+    private static let log = Logger(subsystem: "ColorCoded", category: "NoteheadDetector")
 
     // MARK: - Public
 
@@ -21,12 +23,34 @@ enum NoteheadDetector {
         contoursBinaryOverride: ([UInt8], Int, Int)? = nil
     ) async -> (noteRects: [CGRect], staffRects: [CGRect]) {
 
-        // Use override if provided; otherwise use the original image CG
-        let baseCG: CGImage? =
-            contoursBinaryOverride.flatMap { cgImageFromBinary($0) }
-            ?? image.cgImageSafe
+        if let (binary, width, height) = contoursBinaryOverride {
+            let cclStart = CFAbsoluteTimeGetCurrent()
+            let components = BinaryConnectedComponents.label(
+                binary: binary,
+                width: width,
+                height: height,
+                roi: nil
+            )
+            let cclMs = (CFAbsoluteTimeGetCurrent() - cclStart) * 1000.0
+            log.notice("PERF cclMs=\(String(format: \"%.1f\", cclMs), privacy: .public)")
 
-        guard let cg = baseCG else { return ([], []) }
+            let boxes = components.map { $0.rect.insetBy(dx: -2, dy: -2) }
+
+            let splitStart = CFAbsoluteTimeGetCurrent()
+            let split = splitMergedBoxes(boxes, binary: binary, width: width, height: height)
+            let splitMs = (CFAbsoluteTimeGetCurrent() - splitStart) * 1000.0
+            log.notice("PERF splitMs=\(String(format: \"%.1f\", splitMs), privacy: .public)")
+
+            let nmsStart = CFAbsoluteTimeGetCurrent()
+            let notes = nonMaxSuppression(split, iouThreshold: 0.78)
+            let nmsMs = (CFAbsoluteTimeGetCurrent() - nmsStart) * 1000.0
+            log.notice("PERF nmsMs=\(String(format: \"%.1f\", nmsMs), privacy: .public)")
+
+            return (notes, [])
+        }
+
+        // Use original image for protect pass
+        guard let cg = image.cgImageSafe else { return ([], []) }
 
         let imageSize = CGSize(width: cg.width, height: cg.height)
 
@@ -68,35 +92,6 @@ enum NoteheadDetector {
                     continuation.resume(returning: ([], []))
                 }
             }
-        }
-    }
-
-    // MARK: - Binary -> CGImage helper
-
-    private static func cgImageFromBinary(_ binary: ([UInt8], Int, Int)) -> CGImage? {
-        let (pixels, width, height) = binary
-        guard width > 0, height > 0, pixels.count >= width * height else { return nil }
-
-        let bytesPerRow = width
-        let colorSpace = CGColorSpaceCreateDeviceGray()
-
-        return pixels.withUnsafeBytes { ptr in
-            guard let base = ptr.baseAddress else { return nil }
-            guard let provider = CGDataProvider(data: NSData(bytes: base, length: pixels.count)) else { return nil }
-
-            return CGImage(
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bitsPerPixel: 8,
-                bytesPerRow: bytesPerRow,
-                space: colorSpace,
-                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
-                provider: provider,
-                decode: nil,
-                shouldInterpolate: false,
-                intent: .defaultIntent
-            )
         }
     }
 
@@ -149,6 +144,30 @@ enum NoteheadDetector {
 
         for box in boxes {
             out.append(contentsOf: NoteBlobSplitter.splitIfNeeded(rect: box, cg: cgImage, maxSplits: 6))
+        }
+        return out
+    }
+
+    private static func splitMergedBoxes(
+        _ boxes: [CGRect],
+        binary: [UInt8],
+        width: Int,
+        height: Int
+    ) -> [CGRect] {
+        guard !boxes.isEmpty else { return [] }
+        var out: [CGRect] = []
+        out.reserveCapacity(boxes.count * 2)
+
+        for box in boxes {
+            out.append(
+                contentsOf: NoteBlobSplitter.splitIfNeeded(
+                    rect: box,
+                    binary: binary,
+                    width: width,
+                    height: height,
+                    maxSplits: 6
+                )
+            )
         }
         return out
     }
