@@ -846,12 +846,11 @@ enum OfflineScoreColorizer {
                 h.strokeOverlap = ov
 
                 let aspect = h.rect.width / max(1.0, h.rect.height)
-                let fillLike = ext > 0.20 && ext < 0.78
-                let aspectNear = aspect > 0.75 && aspect < 1.35
+                let fillLike = ext > 0.18 && ext < 0.82
+                let aspectNear = aspect > 0.70 && aspect < 1.40
                 let lineLikeLow = !pca.isLineLike && pca.eccentricity < 5.0
-                let staffClose = (h.staffStepError ?? 1.0) < 0.28
-                let staffTight = (h.staffStepError ?? 1.0) < 0.18
-                h.isHeadLike = fillLike && aspectNear && lineLikeLow && (staffClose || staffTight)
+                let staffClose = (h.staffStepError ?? 1.0) < 0.30
+                h.isHeadLike = (fillLike && aspectNear && lineLikeLow) || (staffClose && fillLike)
 
                 // Shape score: 0..1
                 let fillTarget: CGFloat = 0.48
@@ -1175,11 +1174,6 @@ enum OfflineScoreColorizer {
             }
 
             if !isHeadLike {
-                let distToStaff = minDistanceToAnyStaffLine(y: rect.midY, system: system)
-                if distToStaff > spacing * 0.75 && strokeOverlap > 0.10 {
-                    return "stroke_overlap_far"
-                }
-
                 if strokeOverlap > 0.22 && max(w, h) < spacing * 0.60 {
                     return "stroke_overlap_small"
                 }
