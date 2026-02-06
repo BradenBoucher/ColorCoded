@@ -49,8 +49,13 @@ private struct DebugMaskData {
     let height: Int
 }
 
+private struct DebugRejectedRect {
+    let rect: CGRect
+    let reason: String
+}
+
 private var debugMaskData: DebugMaskData?
-private var debugRejectedRects: [CGRect]?
+private var debugRejectedRects: [DebugRejectedRect]?
 
 enum OfflineScoreColorizer {
     private static let log = Logger(subsystem: "ColorCoded", category: "OfflinePipeline")
@@ -722,11 +727,11 @@ enum OfflineScoreColorizer {
         guard !noteheads.isEmpty else { return [] }
 
         var rejectStats: [String: Int] = [:]
-        var rejectedRects: [CGRect] = []
+        var rejectedRects: [DebugRejectedRect] = []
         func recordReject(_ reason: String, _ rect: CGRect?) {
             rejectStats[reason, default: 0] += 1
             guard debugMasksEnabled(), let rect else { return }
-            rejectedRects.append(rect)
+            rejectedRects.append(DebugRejectedRect(rect: rect, reason: reason))
         }
 
         // If systems not found, only do dedupe (avoid losing notes)
@@ -840,6 +845,14 @@ enum OfflineScoreColorizer {
                 h.inkExtent = ext
                 h.strokeOverlap = ov
 
+                let aspect = h.rect.width / max(1.0, h.rect.height)
+                let fillLike = ext > 0.20 && ext < 0.78
+                let aspectNear = aspect > 0.75 && aspect < 1.35
+                let lineLikeLow = !pca.isLineLike && pca.eccentricity < 5.0
+                let staffClose = (h.staffStepError ?? 1.0) < 0.28
+                let staffTight = (h.staffStepError ?? 1.0) < 0.18
+                h.isHeadLike = fillLike && aspectNear && lineLikeLow && (staffClose || staffTight)
+
                 // Shape score: 0..1
                 let fillTarget: CGFloat = 0.48
                 let fillScore = 1.0 - min(1.0, abs(ext - fillTarget) / 0.40)
@@ -865,7 +878,7 @@ enum OfflineScoreColorizer {
             let clustered = ClusterSuppressor.suppress(gated, spacing: spacing)
 
             // Targeted pruning: remove stems/tails/slurs/flat junk
-            let pruned = clustered.filter { head in
+            let pruned = clustered.compactMap { head -> ScoredHead? in
                 if let reason = rejectReasonForStemOrLine(head,
                                                          system: system,
                                                          spacing: spacing,
@@ -874,9 +887,14 @@ enum OfflineScoreColorizer {
                                                          binaryRaw: binaryRaw,
                                                          barlineXs: barlineXs) {
                     recordReject(reason, head.rect)
-                    return false
+                    return nil
                 }
-                return true
+                var kept = head
+                if kept.isHeadLike,
+                   strokeOverlapExceedsThreshold(kept, spacing: spacing) {
+                    kept.rect = clampHeadRectIfNeeded(kept.rect, spacing: spacing)
+                }
+                return kept
             }
 
             // Consolidate (stepIndex + X bin) keeps true head, drops duplicates
@@ -916,6 +934,55 @@ enum OfflineScoreColorizer {
     // ------------------------------------------------------------------
     // REJECTION RULES (STEMS / TAILS / LINES)
     // ------------------------------------------------------------------
+
+    private static func strokeOverlapExceedsThreshold(_ head: ScoredHead, spacing: CGFloat) -> Bool {
+        guard let strokeOverlap = head.strokeOverlap else { return false }
+        let rect = head.rect
+        let w = rect.width
+        let h = rect.height
+        let aspect = w / max(1.0, h)
+
+        if strokeOverlap > 0.22 && max(w, h) < spacing * 0.60 {
+            return true
+        }
+
+        let tallEnough = h > spacing * 0.55
+        let notWide = aspect < 1.05
+        if tallEnough && notWide && strokeOverlap > 0.08 {
+            return true
+        }
+
+        let somewhatSkinny = aspect < 0.85
+        if h > spacing * 0.75 && strokeOverlap > 0.16 && somewhatSkinny {
+            return true
+        }
+
+        if h > spacing * 1.55 && strokeOverlap > 0.26 {
+            return true
+        }
+
+        return false
+    }
+
+    private static func clampHeadRectIfNeeded(_ rect: CGRect, spacing: CGFloat) -> CGRect {
+        var result = rect
+        let cx = rect.midX
+        let cy = rect.midY
+
+        if rect.width > 1.4 * spacing {
+            let clampedWidth = 1.1 * spacing
+            result.origin.x = cx - clampedWidth / 2.0
+            result.size.width = clampedWidth
+        }
+
+        if rect.height > 1.6 * spacing {
+            let clampedHeight = 1.2 * spacing
+            result.origin.y = cy - clampedHeight / 2.0
+            result.size.height = clampedHeight
+        }
+
+        return result
+    }
 
     private static func rejectReasonForStemOrLine(_ head: ScoredHead,
                                                  system: SystemBlock,
@@ -957,6 +1024,7 @@ enum OfflineScoreColorizer {
 
         // If something is very notehead-like, be reluctant to reject it.
         let strongNotehead = head.shapeScore > 0.72 && strokeOverlap < 0.18 && !colStem
+        let isHeadLike = head.isHeadLike
 
         // Ledger / staff-line metrics
         let ledgerMetrics: PatchMetrics? = {
@@ -1106,23 +1174,30 @@ enum OfflineScoreColorizer {
                 if h > spacing * 0.26 { return "col_stem" }
             }
 
-            if strokeOverlap > 0.22 && max(w, h) < spacing * 0.60 {
-                return "stroke_overlap_small"
-            }
+            if !isHeadLike {
+                let distToStaff = minDistanceToAnyStaffLine(y: rect.midY, system: system)
+                if distToStaff > spacing * 0.75 && strokeOverlap > 0.10 {
+                    return "stroke_overlap_far"
+                }
 
-            let tallEnough = h > spacing * 0.55
-            let notWide = aspect < 1.05
-            if tallEnough && notWide && strokeOverlap > 0.08 {
-                return "stroke_overlap_tall"
-            }
+                if strokeOverlap > 0.22 && max(w, h) < spacing * 0.60 {
+                    return "stroke_overlap_small"
+                }
 
-            let somewhatSkinny = aspect < 0.85
-            if h > spacing * 0.75 && strokeOverlap > 0.16 && somewhatSkinny {
-                return "stroke_overlap_skinny"
-            }
+                let tallEnough = h > spacing * 0.55
+                let notWide = aspect < 1.05
+                if tallEnough && notWide && strokeOverlap > 0.08 {
+                    return "stroke_overlap_tall"
+                }
 
-            if h > spacing * 1.55 && strokeOverlap > 0.26 {
-                return "stroke_overlap_very_tall"
+                let somewhatSkinny = aspect < 0.85
+                if h > spacing * 0.75 && strokeOverlap > 0.16 && somewhatSkinny {
+                    return "stroke_overlap_skinny"
+                }
+
+                if h > spacing * 1.55 && strokeOverlap > 0.26 {
+                    return "stroke_overlap_very_tall"
+                }
             }
         }
 
@@ -1554,8 +1629,13 @@ enum OfflineScoreColorizer {
 
             if debugMasksEnabled(), let rejected = debugRejectedRects, !rejected.isEmpty {
                 ctx.cgContext.setLineWidth(max(1.0, baseRadius * 0.10))
-                ctx.cgContext.setStrokeColor(UIColor.systemRed.withAlphaComponent(0.45).cgColor)
-                for rect in rejected { ctx.cgContext.stroke(rect) }
+                for item in rejected {
+                    let color: UIColor = item.reason == "stroke_overlap_tall"
+                        ? UIColor.systemYellow.withAlphaComponent(0.55)
+                        : UIColor.systemRed.withAlphaComponent(0.45)
+                    ctx.cgContext.setStrokeColor(color.cgColor)
+                    ctx.cgContext.stroke(item.rect)
+                }
             }
 
             if let watermark = pipelineWatermark {
