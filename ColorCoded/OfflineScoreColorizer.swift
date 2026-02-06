@@ -179,6 +179,10 @@ enum OfflineScoreColorizer {
                         let contourStart = CFAbsoluteTimeGetCurrent()
 
                         var best = protectNoteRects
+                        let protectCount = protectNoteRects.count
+                        var pass2CleanCount: Int?
+                        var pass2RawCount: Int?
+
                         func keepIfBetter(_ candidate: [CGRect]) {
                             if candidate.count > best.count {
                                 best = candidate
@@ -190,14 +194,17 @@ enum OfflineScoreColorizer {
                                 in: image,
                                 contoursBinaryOverride: cleanedBinary
                             )
+                            pass2CleanCount = pass2Clean.count
                             keepIfBetter(pass2Clean)
 
                             // If it looks under-detected, try raw binary too
-                            if pass2Clean.count < 200, let rb = rawBinary {
+                            let underDetectedThreshold = max(1, Int(Double(protectCount) * 0.85))
+                            if pass2Clean.count < underDetectedThreshold, let rb = rawBinary {
                                 let pass2Raw = await NoteheadDetector.detectNoteheads(
                                     in: image,
                                     contoursBinaryOverride: rb
                                 )
+                                pass2RawCount = pass2Raw.count
                                 keepIfBetter(pass2Raw)
                             }
                         } else if let rb = rawBinary {
@@ -205,11 +212,15 @@ enum OfflineScoreColorizer {
                                 in: image,
                                 contoursBinaryOverride: rb
                             )
+                            pass2RawCount = pass2Raw.count
                             keepIfBetter(pass2Raw)
                         }
 
                         // Final chosen set
                         let noteRects = best
+                        log.notice(
+                            "pass2Clean(CCL)=\(pass2CleanCount ?? -1, privacy: .public) pass2Raw(CCL)=\(pass2RawCount ?? -1, privacy: .public) protect(Vision)=\(protectCount, privacy: .public) best=\(noteRects.count, privacy: .public)"
+                        )
 
                         let contourMs = (CFAbsoluteTimeGetCurrent() - contourStart) * 1000.0
                         log.notice("PERF contoursMs=\(String(format: "%.1f", contourMs), privacy: .public)")
