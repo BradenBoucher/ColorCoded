@@ -186,12 +186,65 @@ enum OfflineScoreColorizer {
 
                         var best = protectNoteRects
                         let protectCount = protectNoteRects.count
+                        //
+                        //
+                        //
+                        //
+                        //
+                        //
+                        //
+                        //
+                        //
+                        //
+                        //
+                        //
+                        // ============================================================
+                        // === START: PASS2 MERGE MOP-UP (REPLACE ENTIRE OLD keepIfBetter BLOCK)
+                        // ============================================================
+
                         var pass2CleanCount: Int?
                         var pass2RawCount: Int?
 
-                        func keepIfBetter(_ candidate: [CGRect]) {
-                            if candidate.count > best.count {
-                                best = candidate
+                        @inline(__always)
+                        func _iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
+                            let inter = a.intersection(b)
+                            if inter.isNull { return 0 }
+                            let interA = inter.width * inter.height
+                            if interA <= 0 { return 0 }
+                            let unionA = a.width * a.height + b.width * b.height - interA
+                            return unionA > 0 ? (interA / unionA) : 0
+                        }
+
+                        @inline(__always)
+                        func _center(_ r: CGRect) -> CGPoint { CGPoint(x: r.midX, y: r.midY) }
+
+                        @inline(__always)
+                        func _insideAnySystem(_ p: CGPoint, systems: [SystemBlock]) -> Bool {
+                            for s in systems { if s.bbox.contains(p) { return true } }
+                            return false
+                        }
+
+                        // Seed = Vision protect baseline (best recall anchor)
+                        var merged = best   // your code already sets `best` to the protect(Vision) result
+                        let protectCount = merged.count
+
+                        func _mergeMopUp(_ mop: [CGRect], into merged: inout [CGRect], systems: [SystemBlock]) {
+                            guard !mop.isEmpty else { return }
+                            for r in mop {
+                                let c = _center(r)
+
+                                // Safety: only keep CCL results that land inside systems
+                                guard _insideAnySystem(c, systems: systems) else { continue }
+
+                                // Only add if it doesn't overlap an existing detection
+                                var overlaps = false
+                                for e in merged {
+                                    if _iou(r, e) >= 0.15 {
+                                        overlaps = true
+                                        break
+                                    }
+                                }
+                                if !overlaps { merged.append(r) }
                             }
                         }
 
@@ -202,10 +255,10 @@ enum OfflineScoreColorizer {
                                 systems: systems
                             )
                             pass2CleanCount = pass2Clean.count
-                            keepIfBetter(pass2Clean)
+                            _mergeMopUp(pass2Clean, into: &merged, systems: systems)
 
-                            let bestCount = max(1, best.count)
-                            let rawFallbackThreshold = max(1, Int(ceil(Double(bestCount) * 0.92)))
+                            // Run raw fallback only if cleaned CCL is materially worse than protect
+                            let rawFallbackThreshold = max(1, Int(ceil(Double(max(1, protectCount)) * 0.92)))
                             if pass2Clean.count < rawFallbackThreshold, let rb = rawBinary {
                                 let pass2Raw = await NoteheadDetector.detectNoteheads(
                                     in: image,
@@ -213,7 +266,7 @@ enum OfflineScoreColorizer {
                                     systems: systems
                                 )
                                 pass2RawCount = pass2Raw.count
-                                keepIfBetter(pass2Raw)
+                                _mergeMopUp(pass2Raw, into: &merged, systems: systems)
                             }
                         } else if let rb = rawBinary {
                             let pass2Raw = await NoteheadDetector.detectNoteheads(
@@ -222,17 +275,26 @@ enum OfflineScoreColorizer {
                                 systems: systems
                             )
                             pass2RawCount = pass2Raw.count
-                            keepIfBetter(pass2Raw)
+                            _mergeMopUp(pass2Raw, into: &merged, systems: systems)
                         }
 
-                        // Final chosen set
-                        let noteRects = best
+                        // Final chosen set = protect + non-overlapping CCL mop-up
+                        let noteRects = merged
+
                         log.notice(
-                            "pass2Clean(CCL)=\(pass2CleanCount ?? -1, privacy: .public) pass2Raw(CCL)=\(pass2RawCount ?? -1, privacy: .public) protect(Vision)=\(protectCount, privacy: .public) best=\(noteRects.count, privacy: .public)"
+                            "pass2Clean(CCL)=\(pass2CleanCount ?? -1, privacy: .public) " +
+                            "pass2Raw(CCL)=\(pass2RawCount ?? -1, privacy: .public) " +
+                            "protect(Vision)=\(protectCount, privacy: .public) " +
+                            "best=\(noteRects.count, privacy: .public)"
                         )
 
                         let contourMs = (CFAbsoluteTimeGetCurrent() - contourStart) * 1000.0
                         log.notice("PERF contoursMs=\(String(format: "%.1f", contourMs), privacy: .public)")
+
+                        // ============================================================
+                        // === END: PASS2 MERGE MOP-UP
+                        // ============================================================
+
 
 
                         // High recall note candidates
@@ -257,15 +319,16 @@ enum OfflineScoreColorizer {
 
                         // Use raw binary for shape metrics, cleaned binary for line/stem rejection.
                         let filterStart = CFAbsoluteTimeGetCurrent()
-                        let filtered = filterNoteheadsHighRecall(
-                            detection.noteRects,
+                        let filtered = OfflineScoreColorizer.filterNoteheadsHighRecall_DROPIN(
+                            noteRects,
                             systems: systems,
                             barlines: barlines,
-                            fallbackSpacing: staffModel?.lineSpacing ?? 12.0,
-                            cgImage: image.cgImageSafe,
+                            fallbackSpacing: spacing,
+                            cgImage: cg,
                             binaryRawOverride: rawBinary,
                             binaryCleanOverride: cleanedBinary
                         )
+
                         let filterMs = (CFAbsoluteTimeGetCurrent() - filterStart) * 1000.0
                         log.notice("PERF filterMs=\(String(format: "%.1f", filterMs), privacy: .public)")
 
@@ -716,219 +779,242 @@ enum OfflineScoreColorizer {
     // FILTERING PIPELINE (YOUR HIGH RECALL FILTER)
     // ------------------------------------------------------------------
 
-    private static func filterNoteheadsHighRecall(_ noteheads: [CGRect],
-                                                  systems: [SystemBlock],
-                                                  barlines: [CGRect],
-                                                  fallbackSpacing: CGFloat,
-                                                  cgImage: CGImage?,
-                                                  binaryRawOverride: ([UInt8], Int, Int)?,
-                                                  binaryCleanOverride: ([UInt8], Int, Int)?) -> [CGRect] {
-        log.notice("filterNoteheadsHighRecall binaryRaw.nil=\(binaryRawOverride == nil, privacy: .public) binaryClean.nil=\(binaryCleanOverride == nil, privacy: .public)")
-        guard !noteheads.isEmpty else { return [] }
+    static func filterNoteheadsHighRecall_DROPIN(_ noteheads: [CGRect],
+                                                     systems: [SystemBlock],
+                                                     barlines: [CGRect],
+                                                     fallbackSpacing: CGFloat,
+                                                     cgImage: CGImage?,
+                                                     binaryRawOverride: ([UInt8], Int, Int)?,
+                                                     binaryCleanOverride: ([UInt8], Int, Int)?) -> [CGRect] {
+            log.notice("filterNoteheadsHighRecall binaryRaw.nil=\(binaryRawOverride == nil, privacy: .public) binaryClean.nil=\(binaryCleanOverride == nil, privacy: .public)")
+            guard !noteheads.isEmpty else { return [] }
 
-        var rejectStats: [String: Int] = [:]
-        var rejectedRects: [DebugRejectedRect] = []
-        func recordReject(_ reason: String, _ rect: CGRect?) {
-            rejectStats[reason, default: 0] += 1
-            guard debugMasksEnabled(), let rect else { return }
-            rejectedRects.append(DebugRejectedRect(rect: rect, reason: reason))
-        }
+            var rejectStats: [String: Int] = [:]
+            var rejectedRects: [DebugRejectedRect] = []
+            func recordReject(_ reason: String, _ rect: CGRect?) {
+                rejectStats[reason, default: 0] += 1
+                guard debugMasksEnabled(), let rect else { return }
+                rejectedRects.append(DebugRejectedRect(rect: rect, reason: reason))
+            }
 
-        // If systems not found, only do dedupe (avoid losing notes)
-        guard !systems.isEmpty else {
-            debugRejectedRects = nil
-            return DuplicateSuppressor.suppress(noteheads, spacing: fallbackSpacing)
-        }
+            // If systems not found, only do dedupe (avoid losing notes)
+            guard !systems.isEmpty else {
+                debugRejectedRects = nil
+                return DuplicateSuppressor.suppress(noteheads, spacing: fallbackSpacing)
+            }
 
-        // Build binary page once (reused across systems)
-        let binaryRaw: ([UInt8], Int, Int)? = binaryRawOverride ?? {
-            guard let cgImage else { return nil }
-            return buildBinaryInkMap(from: cgImage, lumThreshold: 175)
-        }()
-        let binaryClean: ([UInt8], Int, Int)? = binaryCleanOverride ?? binaryRaw
+            // Build binary page once (reused across systems)
+            let binaryRaw: ([UInt8], Int, Int)? = binaryRawOverride ?? {
+                guard let cgImage else { return nil }
+                return buildBinaryInkMap(from: cgImage, lumThreshold: 175)
+            }()
+            let binaryClean: ([UInt8], Int, Int)? = binaryCleanOverride ?? binaryRaw
 
-        var out: [CGRect] = []
-        var consumed = Set<Int>()
+            var out: [CGRect] = []
+            var consumed = Set<Int>()
 
-        for system in systems {
-            let spacing = max(6.0, system.spacing)
+            for system in systems {
+                let spacing = max(6.0, system.spacing)
 
-            // barline Xs within system (used for penalties + barline veto)
-            let barlineXs = barlines
-                .filter { $0.maxY >= system.bbox.minY && $0.minY <= system.bbox.maxY }
-                .map { $0.midX }
+                // ----------------------------
+                // NEW: staff-band rect
+                // This prevents title/header text from ever entering the system pipeline,
+                // even if system.bbox is too tall.
+                // ----------------------------
+                let staffMinY: CGFloat = {
+                    let tMin = system.trebleLines.min() ?? system.bbox.minY
+                    let bMin = system.bassLines.min() ?? tMin
+                    return min(tMin, bMin)
+                }()
+                let staffMaxY: CGFloat = {
+                    let tMax = system.trebleLines.max() ?? system.bbox.maxY
+                    let bMax = system.bassLines.max() ?? tMax
+                    return max(tMax, bMax)
+                }()
+                let bandPad = spacing * 3.5
+                let bandY0 = max(system.bbox.minY, staffMinY - bandPad)
+                let bandY1 = min(system.bbox.maxY, staffMaxY + bandPad)
 
-            // Symbol zone (clef/key/time region)
-            let symbolZone: CGRect = {
-                let bbox = system.bbox
-                let baseWidth = max(12.0, spacing * 7.5)
-
-                var zone = CGRect(
-                    x: bbox.minX,
-                    y: bbox.minY,
-                    width: min(baseWidth, bbox.width * 0.33),
-                    height: bbox.height
+                let staffBand = CGRect(
+                    x: system.bbox.minX,
+                    y: bandY0,
+                    width: system.bbox.width,
+                    height: max(1.0, bandY1 - bandY0)
                 )
 
-                // Extend to first detected barline if present
-                let candidates = barlines.filter { br in
-                    br.maxY >= bbox.minY && br.minY <= bbox.maxY &&
-                    br.maxX > bbox.minX && br.minX < bbox.maxX
-                }
-                if let nearest = candidates.min(by: { $0.minX < $1.minX }) {
-                    let clampedX = max(bbox.minX, min(nearest.minX, bbox.maxX))
-                    zone.size.width = max(zone.width, clampedX - bbox.minX)
-                }
+                // barline Xs within system (used for penalties + barline veto)
+                let barlineXs = barlines
+                    .filter { $0.maxY >= system.bbox.minY && $0.minY <= system.bbox.maxY }
+                    .map { $0.midX }
 
-                // Widen zone a bit to eat left-side clutter
-                zone.size.width = min(bbox.width * 0.45, zone.width + spacing * 2.5)
+                // Symbol zone (clef/key/time region)
+                let symbolZone: CGRect = {
+                    let bbox = system.bbox
+                    let baseWidth = max(12.0, spacing * 7.5)
 
-                return zone
-            }()
+                    var zone = CGRect(
+                        x: bbox.minX,
+                        y: bbox.minY,
+                        width: min(baseWidth, bbox.width * 0.33),
+                        height: bbox.height
+                    )
 
-            // Build vertical stroke mask in this system (stems/tails detector)
-            let vMask: VerticalStrokeMask? = {
-                guard let binaryClean else { return nil }
-                let (bin, w, h) = binaryClean
-                let minRun = max(3, Int((spacing * 0.80).rounded()))
-                return VerticalStrokeMask.build(from: bin, width: w, height: h, roi: system.bbox, minRun: minRun)
-            }()
+                    // Extend to first detected barline if present
+                    let candidates = barlines.filter { br in
+                        br.maxY >= bbox.minY && br.minY <= bbox.maxY &&
+                        br.maxX > bbox.minX && br.minX < bbox.maxX
+                    }
+                    if let nearest = candidates.min(by: { $0.minX < $1.minX }) {
+                        let clampedX = max(bbox.minX, min(nearest.minX, bbox.maxX))
+                        zone.size.width = max(zone.width, clampedX - bbox.minX)
+                    }
 
-            // Collect candidates in system bbox
-            let systemRects: [CGRect] = noteheads.enumerated().compactMap { idx, r in
-                let c = CGPoint(x: r.midX, y: r.midY)
-                guard system.bbox.contains(c) else { return nil }
-                consumed.insert(idx)
-                return r
-            }
+                    // Widen zone a bit to eat left-side clutter
+                    zone.size.width = min(bbox.width * 0.45, zone.width + spacing * 2.5)
 
-            // Remove symbol zone only (safe)
-            var noSymbols: [CGRect] = []
-            noSymbols.reserveCapacity(systemRects.count)
-            for rect in systemRects {
-                if symbolZone.contains(CGPoint(x: rect.midX, y: rect.midY)) {
-                    recordReject("symbol_zone", rect)
-                } else {
-                    noSymbols.append(rect)
-                }
-            }
-
-            // Staff-step gate
-            let scored0 = noSymbols.map { ScoredHead(rect: $0) }
-            let gated0 = StaffStepGate.filterCandidates(scored0, system: system)
-            if gated0.count < scored0.count {
-                rejectStats["staff_step_gate", default: 0] += scored0.count - gated0.count
-            }
-
-            // Compute shapeScore BEFORE clustering/suppression so junk loses
-            let gated = gated0.map { head -> ScoredHead in
-                var h = head
-                guard let binaryRaw else { return h }
-
-                let (rawBin, rawW, rawH) = binaryRaw
-                let ext = rectInkExtent(h.rect, bin: rawBin, pageW: rawW, pageH: rawH)
-                let colStem: Bool = {
-                    guard let binaryClean else { return false }
-                    let (cleanBin, cleanW, cleanH) = binaryClean
-                    return isStemLikeByColumnDominance(h.rect, bin: cleanBin, pageW: cleanW, pageH: cleanH)
+                    return zone
                 }()
 
-                let ov = vMask?.overlapRatio(with: h.rect) ?? 0
-                let (pca, thickness): (LineLikenessPCA, Double) = {
-                    //guard let binaryRaw else { return (LineLikenessPCA(eccentricity: 1.0, isLineLike: false), 999) }
+                // Build vertical stroke mask in this system (stems/tails detector)
+                // UPDATED: ROI = staffBand (not full bbox)
+                let vMask: VerticalStrokeMask? = {
+                    guard let binaryClean else { return nil }
+                    let (bin, w, h) = binaryClean
+                    let minRun = max(3, Int((spacing * 0.80).rounded()))
+                    return VerticalStrokeMask.build(from: bin, width: w, height: h, roi: staffBand, minRun: minRun)
+                }()
+
+                // Collect candidates in staffBand (UPDATED)
+                let systemRects: [CGRect] = noteheads.enumerated().compactMap { idx, r in
+                    let c = CGPoint(x: r.midX, y: r.midY)
+                    guard staffBand.contains(c) else { return nil }
+                    consumed.insert(idx)
+                    return r
+                }
+
+                // Remove symbol zone only (safe)
+                var noSymbols: [CGRect] = []
+                noSymbols.reserveCapacity(systemRects.count)
+                for rect in systemRects {
+                    if symbolZone.contains(CGPoint(x: rect.midX, y: rect.midY)) {
+                        recordReject("symbol_zone", rect)
+                    } else {
+                        noSymbols.append(rect)
+                    }
+                }
+
+                // Staff-step gate
+                let scored0 = noSymbols.map { ScoredHead(rect: $0) }
+                let gated0 = StaffStepGate.filterCandidates(scored0, system: system)
+                if gated0.count < scored0.count {
+                    rejectStats["staff_step_gate", default: 0] += scored0.count - gated0.count
+                }
+
+                // Compute shapeScore BEFORE clustering/suppression so junk loses
+                let gated = gated0.map { head -> ScoredHead in
+                    var h = head
+                    guard let binaryRaw else { return h }
+
                     let (rawBin, rawW, rawH) = binaryRaw
-                    let pca = lineLikenessPCA(h.rect, bin: rawBin, pageW: rawW, pageH: rawH)
-                    let thickness = meanStrokeThickness(h.rect, bin: rawBin, pageW: rawW, pageH: rawH)
-                    return (pca, thickness)
-                }()
+                    let ext = rectInkExtent(h.rect, bin: rawBin, pageW: rawW, pageH: rawH)
 
-                h.inkExtent = ext
-                h.strokeOverlap = ov
+                    let colStem: Bool = {
+                        guard let binaryClean else { return false }
+                        let (cleanBin, cleanW, cleanH) = binaryClean
+                        return isStemLikeByColumnDominance(h.rect, bin: cleanBin, pageW: cleanW, pageH: cleanH)
+                    }()
 
-                let aspect = h.rect.width / max(1.0, h.rect.height)
-                let fillLike = ext > 0.18 && ext < 0.82
-                let aspectNear = aspect > 0.70 && aspect < 1.40
-                let lineLikeLow = !pca.isLineLike && pca.eccentricity < 5.0
-                let staffClose = (h.staffStepError ?? 1.0) < 0.30
-                h.isHeadLike = (fillLike && aspectNear && lineLikeLow) || (staffClose && fillLike)
+                    let ov = vMask?.overlapRatio(with: h.rect) ?? 0
 
-                // Shape score: 0..1
-                let fillTarget: CGFloat = 0.48
-                let fillScore = 1.0 - min(1.0, abs(ext - fillTarget) / 0.40)
+                    let (pca, thickness): (LineLikenessPCA, Double) = {
+                        let pca = lineLikenessPCA(h.rect, bin: rawBin, pageW: rawW, pageH: rawH)
+                        let thickness = meanStrokeThickness(h.rect, bin: rawBin, pageW: rawW, pageH: rawH)
+                        return (pca, thickness)
+                    }()
 
-                var s: CGFloat = 0
-                s += 0.55 * fillScore
-                s += 0.25 * (1.0 - min(1.0, ov / 0.35))
-                s += 0.20 * (colStem ? 0.0 : 1.0)
+                    h.inkExtent = ext
+                    h.strokeOverlap = ov
 
-                let ecc = pca.eccentricity
-                let thin = thickness < max(1.0, spacing * 0.10)
-                if ecc > 6.0 && thin {
-                    s *= 0.12
-                } else if ecc > 4.5 && thin {
-                    s *= 0.35
+                    let aspect = h.rect.width / max(1.0, h.rect.height)
+                    let fillLike = ext > 0.18 && ext < 0.82
+                    let aspectNear = aspect > 0.70 && aspect < 1.40
+                    let lineLikeLow = !pca.isLineLike && pca.eccentricity < 5.0
+                    let staffClose = (h.staffStepError ?? 1.0) < 0.30
+                    h.isHeadLike = (fillLike && aspectNear && lineLikeLow) || (staffClose && fillLike)
+
+                    // Shape score: 0..1
+                    let fillTarget: CGFloat = 0.48
+                    let fillScore = 1.0 - min(1.0, abs(ext - fillTarget) / 0.40)
+
+                    var s: CGFloat = 0
+                    s += 0.55 * fillScore
+                    s += 0.25 * (1.0 - min(1.0, ov / 0.35))
+                    s += 0.20 * (colStem ? 0.0 : 1.0)
+
+                    let ecc = pca.eccentricity
+                    let thin = thickness < max(1.0, spacing * 0.10)
+                    if ecc > 6.0 && thin {
+                        s *= 0.12
+                    } else if ecc > 4.5 && thin {
+                        s *= 0.35
+                    }
+
+                    h.shapeScore = max(0, min(1, s))
+                    return h
                 }
 
-                h.shapeScore = max(0, min(1, s))
-                return h
-            }
+                // Chord-aware suppression early (informed by shapeScore)
+                let clustered = ClusterSuppressor.suppress(gated, spacing: spacing)
 
-            // Chord-aware suppression early (informed by shapeScore)
-            let clustered = ClusterSuppressor.suppress(gated, spacing: spacing)
-
-            // Targeted pruning: remove stems/tails/slurs/flat junk
-            let pruned = clustered.compactMap { head -> ScoredHead? in
-                if let reason = rejectReasonForStemOrLine(head,
-                                                         system: system,
-                                                         spacing: spacing,
-                                                         vMask: vMask,
-                                                         binaryClean: binaryClean,
-                                                         binaryRaw: binaryRaw,
-                                                         barlineXs: barlineXs) {
-                    recordReject(reason, head.rect)
-                    return nil
+                // Targeted pruning: remove stems/tails/slurs/flat junk
+                let pruned = clustered.compactMap { head -> ScoredHead? in
+                    if let reason = rejectReasonForStemOrLine(head,
+                                                             system: system,
+                                                             spacing: spacing,
+                                                             vMask: vMask,
+                                                             binaryClean: binaryClean,
+                                                             binaryRaw: binaryRaw,
+                                                             barlineXs: barlineXs) {
+                        recordReject(reason, head.rect)
+                        return nil
+                    }
+                    var kept = head
+                    if kept.isHeadLike,
+                       strokeOverlapExceedsThreshold(kept, spacing: spacing) {
+                        kept.rect = clampHeadRectIfNeeded(kept.rect, spacing: spacing)
+                    }
+                    return kept
                 }
-                var kept = head
-                if kept.isHeadLike,
-                   strokeOverlapExceedsThreshold(kept, spacing: spacing) {
-                    kept.rect = clampHeadRectIfNeeded(kept.rect, spacing: spacing)
+
+                // Consolidate (stepIndex + X bin) keeps true head, drops duplicates
+                let consolidated = consolidateByStepAndX(pruned, spacing: spacing)
+
+                // Final light dedupe
+                let deduped = DuplicateSuppressor.suppress(consolidated, spacing: spacing)
+                out.append(contentsOf: deduped)
+            }
+
+            // Remaining outside systems: only dedupe (do not drop notes)
+            if consumed.count < noteheads.count {
+                let remaining = noteheads.enumerated().compactMap { idx, r -> CGRect? in
+                    guard !consumed.contains(idx) else { return nil }
+                    return r
                 }
-                return kept
+                out.append(contentsOf: DuplicateSuppressor.suppress(remaining, spacing: fallbackSpacing))
             }
 
-            // Consolidate (stepIndex + X bin) keeps true head, drops duplicates
-            let consolidated = consolidateByStepAndX(
-                pruned,
-                spacing: spacing
-            )
-
-            // Final light dedupe
-            let deduped = DuplicateSuppressor.suppress(consolidated, spacing: spacing)
-            out.append(contentsOf: deduped)
-        }
-
-        // Remaining outside systems: only dedupe (do not drop notes)
-        if consumed.count < noteheads.count {
-            let remaining = noteheads.enumerated().compactMap { idx, r -> CGRect? in
-                guard !consumed.contains(idx) else { return nil }
-                return r
+            if !rejectStats.isEmpty {
+                let topReasons = rejectStats.sorted { lhs, rhs in
+                    if lhs.value == rhs.value { return lhs.key < rhs.key }
+                    return lhs.value > rhs.value
+                }
+                let summary = topReasons.prefix(10).map { "\($0.key)=\($0.value)" }.joined(separator: " | ")
+                log.notice("filterNoteheadsHighRecall rejects=\(summary, privacy: .public)")
             }
-            out.append(contentsOf: DuplicateSuppressor.suppress(remaining, spacing: fallbackSpacing))
+
+            debugRejectedRects = debugMasksEnabled() ? rejectedRects : nil
+            return out
         }
-
-        if !rejectStats.isEmpty {
-            let topReasons = rejectStats.sorted { lhs, rhs in
-                if lhs.value == rhs.value { return lhs.key < rhs.key }
-                return lhs.value > rhs.value
-            }
-            let summary = topReasons.prefix(8).map { "\($0.key)=\($0.value)" }.joined(separator: " | ")
-            log.notice("filterNoteheadsHighRecall rejects=\(summary, privacy: .public)")
-        }
-
-        debugRejectedRects = debugMasksEnabled() ? rejectedRects : nil
-
-        return out
-    }
 
     // ------------------------------------------------------------------
     // REJECTION RULES (STEMS / TAILS / LINES)
