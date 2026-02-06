@@ -38,17 +38,20 @@ enum NoteBlobSplitter {
         let threshold = 180
 
         // If this crop is basically a vertical stroke (barline/stem/tail), DO NOT split it.
-        if isDominantVerticalStroke(pixels: pixels, w: w, h: h, threshold: threshold) {
+        let cgIsInk: (Int, Int) -> Bool = { x, y in
+            isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold)
+        }
+
+        if isDominantVerticalStroke(w: w, h: h, isInk: cgIsInk) {
             return [croppedRect]
         }
 
         // Attempt wide (X) split first
         let wideResult = trySplitWide(
             croppedRect: croppedRect,
-            pixels: pixels,
             w: w,
             h: h,
-            threshold: threshold,
+            isInk: cgIsInk,
             maxSplits: maxSplits
         )
         if wideResult.count >= 2 { return wideResult }
@@ -56,10 +59,9 @@ enum NoteBlobSplitter {
         // Then tall (Y) split (triads / stacked heads)
         let tallResult = trySplitTall(
             croppedRect: croppedRect,
-            pixels: pixels,
             w: w,
             h: h,
-            threshold: threshold,
+            isInk: cgIsInk,
             maxSplits: maxSplits
         )
         if tallResult.count >= 2 { return tallResult }
@@ -94,14 +96,91 @@ enum NoteBlobSplitter {
         return [croppedRect]
     }
 
+    static func splitIfNeeded(
+        rect: CGRect,
+        binary: [UInt8],
+        width: Int,
+        height: Int,
+        maxSplits: Int = 6
+    ) -> [CGRect] {
+        guard width > 0, height > 0, binary.count >= width * height else { return [] }
+
+        let imgW = CGFloat(width)
+        let imgH = CGFloat(height)
+        let croppedRect = rect.intersection(CGRect(x: 0, y: 0, width: imgW, height: imgH))
+        guard croppedRect.width >= 8, croppedRect.height >= 8 else { return [croppedRect] }
+
+        let cropIntegral = croppedRect.integral.intersection(CGRect(x: 0, y: 0, width: imgW, height: imgH))
+        let w = max(1, Int(cropIntegral.width))
+        let h = max(1, Int(cropIntegral.height))
+        let baseX = max(0, Int(cropIntegral.minX))
+        let baseY = max(0, Int(cropIntegral.minY))
+
+        let binaryIsInk: (Int, Int) -> Bool = { x, y in
+            let bx = baseX + x
+            let by = baseY + y
+            let idx = by * width + bx
+            return binary[idx] != 0
+        }
+
+        if isDominantVerticalStroke(w: w, h: h, isInk: binaryIsInk) {
+            return [croppedRect]
+        }
+
+        let wideResult = trySplitWide(
+            croppedRect: croppedRect,
+            w: w,
+            h: h,
+            isInk: binaryIsInk,
+            maxSplits: maxSplits
+        )
+        if wideResult.count >= 2 { return wideResult }
+
+        let tallResult = trySplitTall(
+            croppedRect: croppedRect,
+            w: w,
+            h: h,
+            isInk: binaryIsInk,
+            maxSplits: maxSplits
+        )
+        if tallResult.count >= 2 { return tallResult }
+
+        let ar = croppedRect.width / max(1, croppedRect.height)
+
+        let minDim = min(croppedRect.width, croppedRect.height)
+        let estSingleWide = max(10.0, min(croppedRect.height * 0.60, minDim * 0.9))
+        let estSingleTall = max(10.0, min(croppedRect.width * 0.60, minDim * 0.9))
+
+        if ar >= 1.25 {
+            let expected = Int((croppedRect.width / estSingleWide).rounded())
+            if expected >= 2 {
+                let n = min(maxSplits, expected)
+                let forcedCenters = (0..<n).map { i in
+                    Int((Double(w) * (Double(i) + 0.5) / Double(n)).rounded())
+                }
+                return splitRectsWide(from: forcedCenters, in: croppedRect, cropWidth: w)
+            }
+        } else if ar <= 0.80 {
+            let expected = Int((croppedRect.height / estSingleTall).rounded())
+            if expected >= 2 {
+                let n = min(maxSplits, expected)
+                let forcedCenters = (0..<n).map { i in
+                    Int((Double(h) * (Double(i) + 0.5) / Double(n)).rounded())
+                }
+                return splitRectsTall(from: forcedCenters, in: croppedRect, cropHeight: h)
+            }
+        }
+
+        return [croppedRect]
+    }
+
     // MARK: - Wide split (X)
 
     private static func trySplitWide(
         croppedRect: CGRect,
-        pixels: [UInt8],
         w: Int,
         h: Int,
-        threshold: Int,
+        isInk: (Int, Int) -> Bool,
         maxSplits: Int
     ) -> [CGRect] {
 
@@ -113,7 +192,7 @@ enum NoteBlobSplitter {
         for y in 0..<h {
             var s = 0
             for x in 0..<w {
-                if isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold) { s += 1 }
+                if isInk(x, y) { s += 1 }
             }
             rowInk[y] = s
         }
@@ -132,7 +211,7 @@ enum NoteBlobSplitter {
             for y in y0..<y1 {
                 if rowInk[y] >= beamRowMin { continue } // skip beams / thick staff regions
                 for x in 0..<w {
-                    if isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold) { colInk[x] += 1 }
+                    if isInk(x, y) { colInk[x] += 1 }
                 }
             }
         }
@@ -200,10 +279,9 @@ enum NoteBlobSplitter {
 
     private static func trySplitTall(
         croppedRect: CGRect,
-        pixels: [UInt8],
         w: Int,
         h: Int,
-        threshold: Int,
+        isInk: (Int, Int) -> Bool,
         maxSplits: Int
     ) -> [CGRect] {
 
@@ -219,7 +297,7 @@ enum NoteBlobSplitter {
         for y in 0..<h {
             var s = 0
             for x in x0..<x1 {
-                if isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold) { s += 1 }
+                if isInk(x, y) { s += 1 }
             }
             rowInk[y] = s
         }
@@ -284,7 +362,11 @@ enum NoteBlobSplitter {
     // MARK: - Stem / barline veto
 
     /// Returns true if this crop behaves like a mostly-vertical stroke region.
-    private static func isDominantVerticalStroke(pixels: [UInt8], w: Int, h: Int, threshold: Int) -> Bool {
+    private static func isDominantVerticalStroke(
+        w: Int,
+        h: Int,
+        isInk: (Int, Int) -> Bool
+    ) -> Bool {
         guard w >= 6, h >= 10 else { return false }
 
         // Look at center band columns (stems typically dominate here)
@@ -298,7 +380,7 @@ enum NoteBlobSplitter {
 
         for y in 0..<h {
             for x in 0..<w {
-                if isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold) {
+                if isInk(x, y) {
                     totalInk += 1
                     if x >= c0 && x <= c1 { centerInk += 1 }
                 }
@@ -310,7 +392,7 @@ enum NoteBlobSplitter {
         for x in c0...c1 {
             var run = 0
             for y in 0..<h {
-                if isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold) {
+                if isInk(x, y) {
                     run += 1
                     maxRun = max(maxRun, run)
                 } else {
