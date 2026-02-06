@@ -121,7 +121,14 @@ enum NoteheadDetector {
             )
 
             if box.width < 3 || box.height < 3 { continue }
-            if box.width > 180 || box.height > 220 { continue }
+            //if box.width > 180 || box.height > 220 { continue }
+            // OLD:
+            // if box.width > 180 || box.height > 220 { continue }
+
+            // NEW (recall-first): allow big merged blobs so the splitter can do its job
+            if box.width > imageSize.width * 0.85 { continue }     // only reject absurd full-page blobs
+            if box.height > imageSize.height * 0.85 { continue }
+
 
             let ar = box.width / max(1, box.height)
             if ar < 0.15 || ar > 7.0 { continue }

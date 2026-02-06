@@ -153,14 +153,12 @@ enum NoteBlobSplitter {
         var peaks = findPeaks(sm, peakMin: peakMin, length: w)
 
         // 2) reject peaks that are "too thin" (usually stem fragments)
-        let minPeakWidth = max(3, Int(Double(w) * 0.06)) // ~6% of crop width
-        peaks = peaks.filter { center in
-            let width = peakSupportWidth(arr: sm, center: center, cutoff: max(1, Int(Double(peakMin) * 0.55)))
-            return width >= minPeakWidth
-        }
+        // Replace minPeakWidth based on HEIGHT instead of width
+        let minPeakWidth = max(3, Int(Double(h) * 0.18))   // ~18% of crop height is safer
 
-        // 3) dedupe lightly (keep close noteheads)
-        peaks = dedupePeaks(peaks, minDistance: max(2, Int(Double(w) * 0.045)))
+        // Make dedupe gentler (dense runs need close peaks)
+        peaks = dedupePeaks(peaks, minDistance: max(2, Int(Double(h) * 0.22)))
+
 
         if peaks.count >= 2 {
             peaks = Array(peaks.prefix(maxSplits))
@@ -174,7 +172,9 @@ enum NoteBlobSplitter {
         guard !peakCols.isEmpty else { return [rect] }
 
         // width per head ~ rect.height (clamped)
-        let estW = max(10.0, min(rect.height * 0.98, rect.width / CGFloat(max(1, peakCols.count))))
+        let estW = max(10.0,
+                       min(rect.height * 0.55, rect.width / CGFloat(max(1, peakCols.count))))
+
 
         var out: [CGRect] = []
         out.reserveCapacity(peakCols.count)

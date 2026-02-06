@@ -174,39 +174,53 @@ enum OfflineScoreColorizer {
                         let rawBinary = cleaned?.binaryRaw
                         log.notice("systems.count=\(systems.count, privacy: .public) cleaned!=nil=\(cleaned != nil, privacy: .public) override!=nil=\(cleanedBinary != nil, privacy: .public)")
 
-                        // Pass 2: do contours on binary (MUCH more stable). Fallback if it gets too aggressive.
+                        // Pass 2: do contours on binary (MUCH more stable).
+                        // IMPORTANT: never overwrite a better result with a worse one.
                         let contourStart = CFAbsoluteTimeGetCurrent()
-                        let contourBinary = cleanedBinary ?? rawBinary
 
-                        var noteRects = protectNoteRects
-                        if let contourBinary {
-                            let pass2 = await NoteheadDetector.detectNoteheads(
+                        var best = protectNoteRects
+                        func keepIfBetter(_ candidate: [CGRect]) {
+                            if candidate.count > best.count {
+                                best = candidate
+                            }
+                        }
+
+                        if let cleanedBinary {
+                            let pass2Clean = await NoteheadDetector.detectNoteheads(
                                 in: image,
-                                contoursBinaryOverride: contourBinary
+                                contoursBinaryOverride: cleanedBinary
                             )
-                            // If it looks like we under-detected, retry on raw binary if available
-                            if pass2.count >= 200 {
-                                noteRects = pass2
-                            } else if let rb = rawBinary {
-                                noteRects = await NoteheadDetector.detectNoteheads(
+                            keepIfBetter(pass2Clean)
+
+                            // If it looks under-detected, try raw binary too
+                            if pass2Clean.count < 200, let rb = rawBinary {
+                                let pass2Raw = await NoteheadDetector.detectNoteheads(
                                     in: image,
                                     contoursBinaryOverride: rb
                                 )
+                                keepIfBetter(pass2Raw)
                             }
+                        } else if let rb = rawBinary {
+                            let pass2Raw = await NoteheadDetector.detectNoteheads(
+                                in: image,
+                                contoursBinaryOverride: rb
+                            )
+                            keepIfBetter(pass2Raw)
                         }
+
+                        // Final chosen set
+                        let noteRects = best
+
                         let contourMs = (CFAbsoluteTimeGetCurrent() - contourStart) * 1000.0
                         log.notice("PERF contoursMs=\(String(format: "%.1f", contourMs), privacy: .public)")
 
+
                         // High recall note candidates
                         let detection = NoteDetectionDebug(noteRects: noteRects)
                         let debugDetectMs = 0.0
                         log.notice("PERF debugDetectMs=\(String(format: "%.1f", debugDetectMs), privacy: .public)")
 
 
-                        // High recall note candidates
-                        let detection = NoteDetectionDebug(noteRects: noteRects)
-                        let debugDetectMs = 0.0
-                        log.notice("PERF debugDetectMs=\(String(format: "%.1f", debugDetectMs), privacy: .public)")
 
                         // Barlines
                         let barlineStart = CFAbsoluteTimeGetCurrent()
