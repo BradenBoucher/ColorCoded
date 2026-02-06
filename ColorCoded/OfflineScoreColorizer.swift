@@ -176,16 +176,22 @@ enum OfflineScoreColorizer {
 
                         // Pass 2: do contours on binary (MUCH more stable). Fallback if it gets too aggressive.
                         let contourStart = CFAbsoluteTimeGetCurrent()
-                        let contourCG = cleanedBinary ?? rawBinary ?? image.cgImageSafe
+                        let contourBinary = cleanedBinary ?? rawBinary
 
                         var noteRects = protectNoteRects
-                        if let contourCG {
-                            let pass2 = await NoteheadDetector.detectNoteheads(in: image, contoursCGOverride: contourCG)
+                        if let contourBinary {
+                            let pass2 = await NoteheadDetector.detectNoteheads(
+                                in: image,
+                                contoursBinaryOverride: contourBinary
+                            )
                             // If it looks like we under-detected, retry on raw binary if available
                             if pass2.count >= 200 {
                                 noteRects = pass2
                             } else if let rb = rawBinary {
-                                noteRects = await NoteheadDetector.detectNoteheads(in: image, contoursCGOverride: rb)
+                                noteRects = await NoteheadDetector.detectNoteheads(
+                                    in: image,
+                                    contoursBinaryOverride: rb
+                                )
                             }
                         }
                         let contourMs = (CFAbsoluteTimeGetCurrent() - contourStart) * 1000.0
