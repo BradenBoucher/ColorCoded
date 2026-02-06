@@ -1,6 +1,11 @@
 import CoreGraphics
 
 enum BinaryConnectedComponents {
+    struct Scratch {
+        var visited: [UInt8] = []
+        var stack: [Int] = []
+    }
+
     struct Component {
         let minX: Int
         let minY: Int
@@ -24,7 +29,8 @@ enum BinaryConnectedComponents {
         binary: [UInt8],
         width: Int,
         height: Int,
-        roi: CGRect? = nil
+        roi: CGRect? = nil,
+        scratch: inout Scratch
     ) -> [Component] {
         guard width > 0, height > 0, binary.count >= width * height else { return [] }
 
@@ -39,22 +45,31 @@ enum BinaryConnectedComponents {
         let maxComponentArea = Int(Double(roiArea) * 0.05)
         let hugeArea = Int(Double(roiArea) * 0.20)
 
-        var visited = [UInt8](repeating: 0, count: width * height)
+        if scratch.visited.count != width * height {
+            scratch.visited = [UInt8](repeating: 0, count: width * height)
+        }
+        for y in y0..<y1 {
+            let row = y * width
+            scratch.visited.withUnsafeMutableBufferPointer { buf in
+                guard let base = buf.baseAddress else { return }
+                let start = row + x0
+                base.advanced(by: start).assign(repeating: 0, count: x1 - x0)
+            }
+        }
         var components: [Component] = []
         components.reserveCapacity(256)
 
-        var stack: [Int] = []
-        stack.reserveCapacity(1024)
-
+        scratch.stack.removeAll(keepingCapacity: true)
+        scratch.stack.reserveCapacity(1024)
         for y in y0..<y1 {
             let rowStart = y * width
             for x in x0..<x1 {
                 let idx = rowStart + x
-                if binary[idx] == 0 || visited[idx] != 0 { continue }
+                if binary[idx] == 0 || scratch.visited[idx] != 0 { continue }
 
-                visited[idx] = 1
-                stack.removeAll(keepingCapacity: true)
-                stack.append(idx)
+                scratch.visited[idx] = 1
+                scratch.stack.removeAll(keepingCapacity: true)
+                scratch.stack.append(idx)
 
                 var minX = x
                 var maxX = x
@@ -65,7 +80,7 @@ enum BinaryConnectedComponents {
                 var sumY = 0
                 var tooLarge = false
 
-                while let current = stack.popLast() {
+                while let current = scratch.stack.popLast() {
                     let cy = current / width
                     let cx = current - (cy * width)
 
@@ -91,10 +106,10 @@ enum BinaryConnectedComponents {
                         let nRow = ny * width
                         for nx in nx0...nx1 {
                             let nIdx = nRow + nx
-                            if visited[nIdx] != 0 { continue }
+                            if scratch.visited[nIdx] != 0 { continue }
                             if binary[nIdx] == 0 { continue }
-                            visited[nIdx] = 1
-                            stack.append(nIdx)
+                            scratch.visited[nIdx] = 1
+                            scratch.stack.append(nIdx)
                         }
                     }
                 }
@@ -126,5 +141,15 @@ enum BinaryConnectedComponents {
         }
 
         return components
+    }
+
+    static func label(
+        binary: [UInt8],
+        width: Int,
+        height: Int,
+        roi: CGRect? = nil
+    ) -> [Component] {
+        var scratch = Scratch()
+        return label(binary: binary, width: width, height: height, roi: roi, scratch: &scratch)
     }
 }

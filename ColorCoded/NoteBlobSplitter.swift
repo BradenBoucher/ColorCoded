@@ -42,7 +42,8 @@ enum NoteBlobSplitter {
             isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold)
         }
 
-        if isDominantVerticalStroke(w: w, h: h, isInk: cgIsInk) {
+        let narrowAspect = (croppedRect.width / max(1.0, croppedRect.height)) < 0.55
+        if narrowAspect, isDominantVerticalStroke(w: w, h: h, isInk: cgIsInk) {
             return [croppedRect]
         }
 
@@ -123,7 +124,8 @@ enum NoteBlobSplitter {
             return binary[idx] != 0
         }
 
-        if isDominantVerticalStroke(w: w, h: h, isInk: binaryIsInk) {
+        let narrowAspect = (croppedRect.width / max(1.0, croppedRect.height)) < 0.55
+        if narrowAspect, isDominantVerticalStroke(w: w, h: h, isInk: binaryIsInk) {
             return [croppedRect]
         }
 

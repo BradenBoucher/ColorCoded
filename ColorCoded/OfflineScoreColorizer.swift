@@ -50,6 +50,7 @@ private struct DebugMaskData {
 }
 
 private var debugMaskData: DebugMaskData?
+private var debugRejectedRects: [CGRect]?
 
 enum OfflineScoreColorizer {
     private static let log = Logger(subsystem: "ColorCoded", category: "OfflinePipeline")
@@ -192,17 +193,19 @@ enum OfflineScoreColorizer {
                         if let cleanedBinary {
                             let pass2Clean = await NoteheadDetector.detectNoteheads(
                                 in: image,
-                                contoursBinaryOverride: cleanedBinary
+                                contoursBinaryOverride: cleanedBinary,
+                                systems: systems
                             )
                             pass2CleanCount = pass2Clean.count
                             keepIfBetter(pass2Clean)
 
-                            // If it looks under-detected, try raw binary too
-                            let underDetectedThreshold = max(1, Int(Double(protectCount) * 0.85))
-                            if pass2Clean.count < underDetectedThreshold, let rb = rawBinary {
+                            let bestCount = max(1, best.count)
+                            let rawFallbackThreshold = max(1, Int(ceil(Double(bestCount) * 0.92)))
+                            if pass2Clean.count < rawFallbackThreshold, let rb = rawBinary {
                                 let pass2Raw = await NoteheadDetector.detectNoteheads(
                                     in: image,
-                                    contoursBinaryOverride: rb
+                                    contoursBinaryOverride: rb,
+                                    systems: systems
                                 )
                                 pass2RawCount = pass2Raw.count
                                 keepIfBetter(pass2Raw)
@@ -210,7 +213,8 @@ enum OfflineScoreColorizer {
                         } else if let rb = rawBinary {
                             let pass2Raw = await NoteheadDetector.detectNoteheads(
                                 in: image,
-                                contoursBinaryOverride: rb
+                                contoursBinaryOverride: rb,
+                                systems: systems
                             )
                             pass2RawCount = pass2Raw.count
                             keepIfBetter(pass2Raw)
@@ -297,6 +301,7 @@ enum OfflineScoreColorizer {
                         let strokeRoiMs = cleaned?.perfRoiTotalMs ?? 0
                         log.notice("TIMING page=\(pageIndex + 1, privacy: .public) render=\(String(format: "%.1f", renderMs), privacy: .public)ms staff=\(String(format: "%.1f", staffMs), privacy: .public)ms systems=\(String(format: "%.1f", systemsMs), privacy: .public)ms stroke=\(String(format: "%.1f", strokeMs), privacy: .public)ms strokeBin=\(String(format: "%.1f", strokeBinaryMs), privacy: .public)ms strokeCopy=\(String(format: "%.1f", strokeCopyMs), privacy: .public)ms strokeGsm=\(String(format: "%.1f", strokeGsmMs), privacy: .public)ms strokeProtect=\(String(format: "%.1f", strokeProtectMs), privacy: .public)ms strokeRoi=\(String(format: "%.1f", strokeRoiMs), privacy: .public)ms note=\(String(format: "%.1f", protectDetectMs), privacy: .public)ms bar=\(String(format: "%.1f", barlineMs), privacy: .public)ms filter=\(String(format: "%.1f", filterMs), privacy: .public)ms draw=\(String(format: "%.1f", drawMs), privacy: .public)ms pdf=\(String(format: "%.1f", pdfMs), privacy: .public)ms total=\(String(format: "%.1f", pageMs), privacy: .public)ms")
                         debugMaskData = nil
+                        debugRejectedRects = nil
                         continuation.resume(returning: ())
                     }
                 }
@@ -716,8 +721,17 @@ enum OfflineScoreColorizer {
         log.notice("filterNoteheadsHighRecall binaryRaw.nil=\(binaryRawOverride == nil, privacy: .public) binaryClean.nil=\(binaryCleanOverride == nil, privacy: .public)")
         guard !noteheads.isEmpty else { return [] }
 
+        var rejectStats: [String: Int] = [:]
+        var rejectedRects: [CGRect] = []
+        func recordReject(_ reason: String, _ rect: CGRect?) {
+            rejectStats[reason, default: 0] += 1
+            guard debugMasksEnabled(), let rect else { return }
+            rejectedRects.append(rect)
+        }
+
         // If systems not found, only do dedupe (avoid losing notes)
         guard !systems.isEmpty else {
+            debugRejectedRects = nil
             return DuplicateSuppressor.suppress(noteheads, spacing: fallbackSpacing)
         }
 
@@ -784,13 +798,22 @@ enum OfflineScoreColorizer {
             }
 
             // Remove symbol zone only (safe)
-            let noSymbols = systemRects.filter { r in
-                !symbolZone.contains(CGPoint(x: r.midX, y: r.midY))
+            var noSymbols: [CGRect] = []
+            noSymbols.reserveCapacity(systemRects.count)
+            for rect in systemRects {
+                if symbolZone.contains(CGPoint(x: rect.midX, y: rect.midY)) {
+                    recordReject("symbol_zone", rect)
+                } else {
+                    noSymbols.append(rect)
+                }
             }
 
             // Staff-step gate
             let scored0 = noSymbols.map { ScoredHead(rect: $0) }
             let gated0 = StaffStepGate.filterCandidates(scored0, system: system)
+            if gated0.count < scored0.count {
+                rejectStats["staff_step_gate", default: 0] += scored0.count - gated0.count
+            }
 
             // Compute shapeScore BEFORE clustering/suppression so junk loses
             let gated = gated0.map { head -> ScoredHead in
@@ -843,13 +866,17 @@ enum OfflineScoreColorizer {
 
             // Targeted pruning: remove stems/tails/slurs/flat junk
             let pruned = clustered.filter { head in
-                !shouldRejectAsStemOrLine(head,
-                                         system: system,
-                                         spacing: spacing,
-                                         vMask: vMask,
-                                         binaryClean: binaryClean,
-                                         binaryRaw: binaryRaw,
-                                         barlineXs: barlineXs)
+                if let reason = rejectReasonForStemOrLine(head,
+                                                         system: system,
+                                                         spacing: spacing,
+                                                         vMask: vMask,
+                                                         binaryClean: binaryClean,
+                                                         binaryRaw: binaryRaw,
+                                                         barlineXs: barlineXs) {
+                    recordReject(reason, head.rect)
+                    return false
+                }
+                return true
             }
 
             // Consolidate (stepIndex + X bin) keeps true head, drops duplicates
@@ -872,6 +899,17 @@ enum OfflineScoreColorizer {
             out.append(contentsOf: DuplicateSuppressor.suppress(remaining, spacing: fallbackSpacing))
         }
 
+        if !rejectStats.isEmpty {
+            let topReasons = rejectStats.sorted { lhs, rhs in
+                if lhs.value == rhs.value { return lhs.key < rhs.key }
+                return lhs.value > rhs.value
+            }
+            let summary = topReasons.prefix(8).map { "\($0.key)=\($0.value)" }.joined(separator: " | ")
+            log.notice("filterNoteheadsHighRecall rejects=\(summary, privacy: .public)")
+        }
+
+        debugRejectedRects = debugMasksEnabled() ? rejectedRects : nil
+
         return out
     }
 
@@ -879,18 +917,18 @@ enum OfflineScoreColorizer {
     // REJECTION RULES (STEMS / TAILS / LINES)
     // ------------------------------------------------------------------
 
-    private static func shouldRejectAsStemOrLine(_ head: ScoredHead,
-                                                system: SystemBlock,
-                                                spacing: CGFloat,
-                                                vMask: VerticalStrokeMask?,
-                                                binaryClean: ([UInt8], Int, Int)?,
-                                                binaryRaw: ([UInt8], Int, Int)?,
-                                                barlineXs: [CGFloat]) -> Bool {
+    private static func rejectReasonForStemOrLine(_ head: ScoredHead,
+                                                 system: SystemBlock,
+                                                 spacing: CGFloat,
+                                                 vMask: VerticalStrokeMask?,
+                                                 binaryClean: ([UInt8], Int, Int)?,
+                                                 binaryRaw: ([UInt8], Int, Int)?,
+                                                 barlineXs: [CGFloat]) -> String? {
 
         let rect = head.rect
         let w = rect.width
         let h = rect.height
-        if w <= 1 || h <= 1 { return true }
+        if w <= 1 || h <= 1 { return "invalid_size" }
 
         let aspect = w / max(1.0, h)
 
@@ -932,12 +970,12 @@ enum OfflineScoreColorizer {
             if ledgerMetrics.centerRowMaxRunFrac > 0.70 &&
                 ledgerMetrics.fillRatio < 0.18 &&
                 h < spacing * 0.28 {
-                return true
+                return "ledger_tiny_line"
             }
 
             if ledgerMetrics.centerRowMaxRunFrac > RejectTuning.ledgerRunFrac,
                ledgerMetrics.fillRatio < RejectTuning.ledgerFillMax {
-                return true
+                return "ledger_line"
             }
 
             let distToStaff = minDistanceToAnyStaffLine(y: rect.midY, system: system)
@@ -947,7 +985,7 @@ enum OfflineScoreColorizer {
             if nearStaff && flat && wide &&
                 ledgerMetrics.centerRowMaxRunFrac > RejectTuning.staffLineRunFrac &&
                 ledgerMetrics.fillRatio < RejectTuning.staffLineFillMax {
-                return true
+                return "staff_line"
             }
         }
 
@@ -959,7 +997,7 @@ enum OfflineScoreColorizer {
                 if runMetrics.rowsWithLongRunsFrac > 0.35 &&
                     heightRatio < 0.30 &&
                     runMetrics.fillRatio < 0.22 {
-                    return true
+                    return "row_runs"
                 }
             }
         }
@@ -978,7 +1016,7 @@ enum OfflineScoreColorizer {
             let axisRatioHit = ecc > RejectTuning.axisRatioMin && tailMetrics.fillRatio < 0.18
             let overlapHit = overlapExpanded > RejectTuning.overlapExpandedMin && tailMetrics.fillRatio < 0.20
             if (isLowFill && isAsymmetric) || axisRatioHit || overlapHit {
-                return true
+                return "tail_metrics"
             }
         }
 
@@ -1012,7 +1050,7 @@ enum OfflineScoreColorizer {
                 }
 
                 if Double(maxRun) >= 1.15 * Double(spacing) && inkExtent < 0.30 && ecc > 4.8 {
-                    return true
+                    return "stroke_through"
                 }
             }
         }
@@ -1023,19 +1061,19 @@ enum OfflineScoreColorizer {
             let nearBarline = barlineXs.contains { abs($0 - cx) < spacing * 0.12 }
             if nearBarline {
                 let smallish = max(w, h) < spacing * 0.65
-                if smallish && (strokeOverlap > 0.10 || colStem || lineLike) { return true }
+                if smallish && (strokeOverlap > 0.10 || colStem || lineLike) { return "barline_small" }
 
                 let tallish = h > spacing * 0.60
-                if tallish && strokeOverlap > 0.12 { return true }
+                if tallish && strokeOverlap > 0.12 { return "barline_tall" }
 
-                if colStem { return true }
+                if colStem { return "barline_col_stem" }
             }
         }
 
         // Staccato dots (tiny + high fill)
         if !strongNotehead {
             let tiny = (w < spacing * 0.30) && (h < spacing * 0.30)
-            if tiny && inkExtent > 0.55 { return true }
+            if tiny && inkExtent > 0.55 { return "staccato_dot" }
         }
 
         // Hanging flat fragments away from staff neighborhoods
@@ -1043,7 +1081,7 @@ enum OfflineScoreColorizer {
             let isVeryFlat = (h < spacing * 0.28) && (w > spacing * 1.10)
             if isVeryFlat {
                 let d = minDistanceToAnyStaffLine(y: rect.midY, system: system)
-                if d > spacing * 0.55 { return true }
+                if d > spacing * 0.55 { return "flat_fragment" }
             }
         }
 
@@ -1055,36 +1093,36 @@ enum OfflineScoreColorizer {
             let thinStroke = thickness < Double(max(1.0, spacing * 0.10))
 
             if longish && thinish && lowFill && (lineLike || (ecc > 5.5 && thinStroke)) {
-                return true
+                return "tie_slur"
             }
             if longish && (lineLike && ecc > 6.5) && thinStroke {
-                return true
+                return "tie_slur"
             }
         }
 
         // Stem/tail kill switch
         if !strongNotehead {
             if colStem {
-                if h > spacing * 0.26 { return true }
+                if h > spacing * 0.26 { return "col_stem" }
             }
 
             if strokeOverlap > 0.22 && max(w, h) < spacing * 0.60 {
-                return true
+                return "stroke_overlap_small"
             }
 
             let tallEnough = h > spacing * 0.55
             let notWide = aspect < 1.05
             if tallEnough && notWide && strokeOverlap > 0.08 {
-                return true
+                return "stroke_overlap_tall"
             }
 
             let somewhatSkinny = aspect < 0.85
             if h > spacing * 0.75 && strokeOverlap > 0.16 && somewhatSkinny {
-                return true
+                return "stroke_overlap_skinny"
             }
 
             if h > spacing * 1.55 && strokeOverlap > 0.26 {
-                return true
+                return "stroke_overlap_very_tall"
             }
         }
 
@@ -1095,17 +1133,17 @@ enum OfflineScoreColorizer {
             if rect.midY > trebleBottom && rect.midY < bassTop {
                 let skinny = aspect < 0.90 || aspect > 1.35
                 if skinny && (strokeOverlap > 0.06 || colStem || lineLike) {
-                    return true
+                    return "mid_gap_artifact"
                 }
             }
         }
 
         // Almost empty contour artifacts
         if !strongNotehead, inkExtent < 0.08 {
-            return true
+            return "low_ink"
         }
 
-        return false
+        return nil
     }
 
     // ------------------------------------------------------------------
@@ -1512,6 +1550,12 @@ enum OfflineScoreColorizer {
                 ctx.cgContext.setLineWidth(max(1.5, baseRadius * 0.12))
                 ctx.cgContext.setStrokeColor(UIColor.systemTeal.withAlphaComponent(0.55).cgColor)
                 for rect in barlines { ctx.cgContext.stroke(rect) }
+            }
+
+            if debugMasksEnabled(), let rejected = debugRejectedRects, !rejected.isEmpty {
+                ctx.cgContext.setLineWidth(max(1.0, baseRadius * 0.10))
+                ctx.cgContext.setStrokeColor(UIColor.systemRed.withAlphaComponent(0.45).cgColor)
+                for rect in rejected { ctx.cgContext.stroke(rect) }
             }
 
             if let watermark = pipelineWatermark {

@@ -11,40 +11,62 @@ enum NoteheadDetector {
     /// Production: just notehead rects
     static func detectNoteheads(
         in image: PlatformImage,
-        contoursBinaryOverride: ([UInt8], Int, Int)? = nil
+        contoursBinaryOverride: ([UInt8], Int, Int)? = nil,
+        systems: [SystemBlock]? = nil
     ) async -> [CGRect] {
-        let result = await detectDebug(in: image, contoursBinaryOverride: contoursBinaryOverride)
+        let result = await detectDebug(
+            in: image,
+            contoursBinaryOverride: contoursBinaryOverride,
+            systems: systems
+        )
         return result.noteRects
     }
 
     /// Debug: noteheads + staff rectangles (treble/bass systems).
     static func detectDebug(
         in image: PlatformImage,
-        contoursBinaryOverride: ([UInt8], Int, Int)? = nil
+        contoursBinaryOverride: ([UInt8], Int, Int)? = nil,
+        systems: [SystemBlock]? = nil
     ) async -> (noteRects: [CGRect], staffRects: [CGRect]) {
 
         if let (binary, width, height) = contoursBinaryOverride {
             let cclStart = CFAbsoluteTimeGetCurrent()
-            let components = BinaryConnectedComponents.label(
-                binary: binary,
-                width: width,
-                height: height,
-                roi: nil
-            )
+            let imgRect = CGRect(x: 0, y: 0, width: width, height: height)
+            let systemBlocks = systems ?? []
+            let rois: [CGRect] = systemBlocks.isEmpty
+                ? [imgRect]
+                : systemBlocks.map { system in
+                    let expand = max(6.0, system.spacing * 1.5)
+                    return system.bbox.insetBy(dx: -expand, dy: -expand).intersection(imgRect)
+                }
+
+            var scratch = BinaryConnectedComponents.Scratch()
+            var components: [BinaryConnectedComponents.Component] = []
+            components.reserveCapacity(512)
+            for roi in rois {
+                let roiComponents = BinaryConnectedComponents.label(
+                    binary: binary,
+                    width: width,
+                    height: height,
+                    roi: roi,
+                    scratch: &scratch
+                )
+                components.append(contentsOf: roiComponents)
+            }
             let cclMs = (CFAbsoluteTimeGetCurrent() - cclStart) * 1000.0
-            log.notice("PERF cclMs=\(String(format: \"%.1f\", cclMs), privacy: .public)")
+            log.notice("PERF cclMs=\(String(format: "%.1f", cclMs), privacy: .public)")
 
             let boxes = components.map { $0.rect.insetBy(dx: -2, dy: -2) }
 
             let splitStart = CFAbsoluteTimeGetCurrent()
             let split = splitMergedBoxes(boxes, binary: binary, width: width, height: height)
             let splitMs = (CFAbsoluteTimeGetCurrent() - splitStart) * 1000.0
-            log.notice("PERF splitMs=\(String(format: \"%.1f\", splitMs), privacy: .public)")
+            log.notice("PERF splitMs=\(String(format: "%.1f", splitMs), privacy: .public)")
 
             let nmsStart = CFAbsoluteTimeGetCurrent()
             let notes = nonMaxSuppression(split, iouThreshold: 0.78)
             let nmsMs = (CFAbsoluteTimeGetCurrent() - nmsStart) * 1000.0
-            log.notice("PERF nmsMs=\(String(format: \"%.1f\", nmsMs), privacy: .public)")
+            log.notice("PERF nmsMs=\(String(format: "%.1f", nmsMs), privacy: .public)")
 
             return (notes, [])
         }
