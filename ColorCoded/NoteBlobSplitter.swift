@@ -34,10 +34,8 @@ enum NoteBlobSplitter {
 
         ctx.draw(crop, in: CGRect(x: 0, y: 0, width: w, height: h))
 
-        // Slightly high threshold catches hollow + filled heads without requiring perfect binarization.
         let threshold = 180
 
-        // If this crop is basically a vertical stroke (barline/stem/tail), DO NOT split it.
         let cgIsInk: (Int, Int) -> Bool = { x, y in
             isInk(pixels: pixels, w: w, x: x, y: y, threshold: threshold)
         }
@@ -186,7 +184,6 @@ enum NoteBlobSplitter {
         maxSplits: Int
     ) -> [CGRect] {
 
-        // Only attempt if plausibly wide
         if croppedRect.width < croppedRect.height * 1.10 { return [croppedRect] }
 
         // Build row ink to detect beams
@@ -203,15 +200,13 @@ enum NoteBlobSplitter {
         let rowMax = rowInk.max() ?? 0
         let beamRowMin = Int(Double(rowMax) * 0.80)
 
-        // ignore top/bottom margins
         let y0 = Int(Double(h) * 0.06)
         let y1 = Int(Double(h) * 0.94)
 
-        // Column projection with beam suppression
         var colInk = [Int](repeating: 0, count: w)
         if y1 > y0 {
             for y in y0..<y1 {
-                if rowInk[y] >= beamRowMin { continue } // skip beams / thick staff regions
+                if rowInk[y] >= beamRowMin { continue }
                 for x in 0..<w {
                     if isInk(x, y) { colInk[x] += 1 }
                 }
@@ -230,16 +225,17 @@ enum NoteBlobSplitter {
         let med = percentile(sm, p: 0.50)
         let peakMin = max(2, Int(max(Double(med) * 1.15, Double(maxVal) * 0.18)))
 
-        // 1) find peaks
         var peaks = findPeaks(sm, peakMin: peakMin, length: w)
 
-        // 2) reject peaks that are "too thin" (usually stem fragments)
-        // Replace minPeakWidth based on HEIGHT instead of width
-        let minPeakWidth = max(3, Int(Double(h) * 0.18))   // ~18% of crop height is safer
+        // reject "thin support" peaks (stem fragments)
+        let minPeakWidth = max(3, Int(Double(h) * 0.18))
+        let cutoff = max(1, Int(Double(peakMin) * 0.55))
+        peaks = peaks.filter { center in
+            let support = peakSupportWidth(arr: sm, center: center, cutoff: cutoff)
+            return support >= minPeakWidth
+        }
 
-        // Make dedupe gentler (dense runs need close peaks)
         peaks = dedupePeaks(peaks, minDistance: max(2, Int(Double(h) * 0.22)))
-
 
         if peaks.count >= 2 {
             peaks = Array(peaks.prefix(maxSplits))
@@ -252,10 +248,8 @@ enum NoteBlobSplitter {
     private static func splitRectsWide(from peakCols: [Int], in rect: CGRect, cropWidth: Int) -> [CGRect] {
         guard !peakCols.isEmpty else { return [rect] }
 
-        // width per head ~ rect.height (clamped)
         let estW = max(10.0,
                        min(rect.height * 0.55, rect.width / CGFloat(max(1, peakCols.count))))
-
 
         var out: [CGRect] = []
         out.reserveCapacity(peakCols.count)
@@ -287,10 +281,8 @@ enum NoteBlobSplitter {
         maxSplits: Int
     ) -> [CGRect] {
 
-        // Only attempt if plausibly tall
         if croppedRect.height < croppedRect.width * 1.15 { return [croppedRect] }
 
-        // Ignore left/right band to reduce stems/barlines influence
         let x0 = Int(Double(w) * 0.20)
         let x1 = Int(Double(w) * 0.80)
         if x1 <= x0 { return [croppedRect] }
@@ -318,7 +310,6 @@ enum NoteBlobSplitter {
 
         var peaks = findPeaks(sm, peakMin: peakMin, length: h)
 
-        // Reject peaks that are too thin in Y-support (often noise/tiny marks)
         let minPeakHeight = max(3, Int(Double(h) * 0.06))
         peaks = peaks.filter { center in
             let height = peakSupportWidth(arr: sm, center: center, cutoff: max(1, Int(Double(peakMin) * 0.55)))
@@ -338,7 +329,6 @@ enum NoteBlobSplitter {
     private static func splitRectsTall(from peakRows: [Int], in rect: CGRect, cropHeight: Int) -> [CGRect] {
         guard !peakRows.isEmpty else { return [rect] }
 
-        // height per head ~ rect.width (clamped)
         let estH = max(10.0, min(rect.width * 1.05, rect.height / CGFloat(max(1, peakRows.count))))
 
         var out: [CGRect] = []
@@ -363,7 +353,6 @@ enum NoteBlobSplitter {
 
     // MARK: - Stem / barline veto
 
-    /// Returns true if this crop behaves like a mostly-vertical stroke region.
     private static func isDominantVerticalStroke(
         w: Int,
         h: Int,
@@ -371,7 +360,6 @@ enum NoteBlobSplitter {
     ) -> Bool {
         guard w >= 6, h >= 10 else { return false }
 
-        // Look at center band columns (stems typically dominate here)
         let c0 = Int(Double(w) * 0.35)
         let c1 = Int(Double(w) * 0.65)
         if c1 <= c0 { return false }
@@ -390,7 +378,6 @@ enum NoteBlobSplitter {
         }
         if totalInk == 0 { return false }
 
-        // For each center column, compute max consecutive ink run in Y
         for x in c0...c1 {
             var run = 0
             for y in 0..<h {
@@ -406,9 +393,7 @@ enum NoteBlobSplitter {
         let centerFrac = Double(centerInk) / Double(totalInk)
         let runFrac = Double(maxRun) / Double(h)
 
-        // long vertical run + ink concentrated in center => stem/barline/tail chunk
-        if runFrac > 0.72 && centerFrac > 0.52 { return true }
-        return false
+        return (runFrac > 0.72 && centerFrac > 0.52)
     }
 
     // MARK: - Peak finding
@@ -419,7 +404,6 @@ enum NoteBlobSplitter {
         var i = 1
         while i < length - 1 {
             if arr[i] >= peakMin, arr[i] >= arr[i - 1], arr[i] >= arr[i + 1] {
-                // plateau -> choose center
                 var l = i
                 var r = i
                 while l - 1 >= 0 && arr[l - 1] == arr[i] { l -= 1 }
@@ -433,7 +417,6 @@ enum NoteBlobSplitter {
         return peaks
     }
 
-    /// How wide (in indices) is the peak above cutoff around a center.
     private static func peakSupportWidth(arr: [Int], center: Int, cutoff: Int) -> Int {
         guard !arr.isEmpty else { return 0 }
         let n = arr.count
@@ -503,7 +486,6 @@ enum NoteBlobSplitter {
         return out
     }
 
-    /// p in [0,1]
     private static func percentile(_ arr: [Int], p: Double) -> Int {
         guard !arr.isEmpty else { return 0 }
         let sorted = arr.sorted()

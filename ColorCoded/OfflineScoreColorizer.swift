@@ -1,4 +1,3 @@
-// x
 import Foundation
 import PDFKit
 @preconcurrency import Vision
@@ -74,7 +73,12 @@ enum OfflineScoreColorizer {
         log.notice("PERF systemsMs=\(String(format: "%.1f", systemsMs), privacy: .public)")
 
         let protectStart = CFAbsoluteTimeGetCurrent()
-        let protectNoteRects = await NoteheadDetector.detectNoteheads(in: image)
+        let protectNoteRects = (await NoteheadDetector.detectNoteheads(in: image)).sorted {
+            if $0.midY != $1.midY { return $0.midY < $1.midY }
+            return $0.midX < $1.midX
+        }
+
+
         let protectDetectMs = (CFAbsoluteTimeGetCurrent() - protectStart) * 1000.0
         log.notice("PERF protectDetectMs=\(String(format: "%.1f", protectDetectMs), privacy: .public)")
 
@@ -112,28 +116,14 @@ enum OfflineScoreColorizer {
         }
 
         @inline(__always)
-        func _hasOverlap(_ r: CGRect, _ refs: [CGRect], thr: CGFloat) -> Bool {
-            for e in refs {
-                if _iou(r, e) >= thr { return true }
-            }
-            return false
-        }
-
-        @inline(__always)
         func _insideAnySystem(_ p: CGPoint) -> Bool {
             for s in systems { if s.bbox.contains(p) { return true } }
             return false
         }
 
-        // Seed with protect baseline, but CONFIRM it with CCL results (removes beam junk)
-        var merged: [CGRect] = []
-        merged.reserveCapacity(protectNoteRects.count)
-
-        let protectCount = protectNoteRects.count
-
-        // We'll fill these after pass2 runs:
-        var pass2Clean: [CGRect] = []
-        var pass2Raw: [CGRect] = []
+        // Seed with protect baseline
+        var merged = protectNoteRects
+        let protectCount = merged.count
 
         func _mergeMopUp(_ mop: [CGRect]) {
             guard !mop.isEmpty else { return }
@@ -150,59 +140,33 @@ enum OfflineScoreColorizer {
         }
 
         if let cleanedBinary {
-            pass2Clean = await NoteheadDetector.detectNoteheads(
+            let pass2Clean = await NoteheadDetector.detectNoteheads(
                 in: image,
                 contoursBinaryOverride: cleanedBinary,
                 systems: systems
             )
             pass2CleanCount = pass2Clean.count
+            _mergeMopUp(pass2Clean)
 
             let rawFallbackThreshold = max(1, Int(ceil(Double(max(1, protectCount)) * 0.92)))
             if pass2Clean.count < rawFallbackThreshold, let rb = rawBinary {
-                pass2Raw = await NoteheadDetector.detectNoteheads(
+                let pass2Raw = await NoteheadDetector.detectNoteheads(
                     in: image,
                     contoursBinaryOverride: rb,
                     systems: systems
                 )
                 pass2RawCount = pass2Raw.count
+                _mergeMopUp(pass2Raw)
             }
         } else if let rb = rawBinary {
-            pass2Raw = await NoteheadDetector.detectNoteheads(
+            let pass2Raw = await NoteheadDetector.detectNoteheads(
                 in: image,
                 contoursBinaryOverride: rb,
                 systems: systems
             )
             pass2RawCount = pass2Raw.count
+            _mergeMopUp(pass2Raw)
         }
-
-        let confirmRefs = !pass2Clean.isEmpty ? pass2Clean : pass2Raw
-        let confirmThr: CGFloat = 0.10
-
-        for r in protectNoteRects {
-            if _hasOverlap(r, confirmRefs, thr: confirmThr) {
-                if let cleanedBinary {
-                    let (bin, w, h) = cleanedBinary
-                    let ext = rectInkExtent(r, bin: bin, pageW: w, pageH: h)
-                    let pca = lineLikenessPCA(r, bin: bin, pageW: w, pageH: h)
-
-                    let aspect = r.width / max(1.0, r.height)
-                    let aspectOK = aspect > 0.65 && aspect < 1.55
-                    let fillOK = ext > 0.16 && ext < 0.85
-                    let notLine = !pca.isLineLike && pca.eccentricity < 5.2
-
-                    if aspectOK && fillOK && notLine {
-                        merged.append(r)
-                    }
-                } else {
-                    merged.append(r)
-                }
-            }
-        }
-
-        log.notice("protect confirmed=\(merged.count, privacy: .public) of rawProtect=\(protectCount, privacy: .public)")
-
-        _mergeMopUp(pass2Clean)
-        _mergeMopUp(pass2Raw)
 
         let noteRects = merged
 
@@ -259,15 +223,27 @@ enum OfflineScoreColorizer {
         let statusStamp = "sys=\(systems.count) v=\(vertErasedCount) h=\(horizErasedCount) notes=\(filtered.count)"
 
         let drawStart = CFAbsoluteTimeGetCurrent()
+        
+        let noteheadsForDraw = filtered.sorted {
+            if $0.midY != $1.midY { return $0.midY < $1.midY }
+            return $0.midX < $1.midX
+        }
+
+        let barlinesForDraw = barlines.sorted {
+            if $0.minX != $1.minX { return $0.minX < $1.minX }
+            return $0.minY < $1.minY
+        }
+
         let colored = drawOverlays(
             on: image,
             staff: staffModel,
             systems: systems,
-            noteheads: filtered,
-            barlines: barlines,
+            noteheads: noteheadsForDraw,
+            barlines: barlinesForDraw,
             pipelineWatermark: watermarkText,
             statusStamp: statusStamp
         )
+
         let drawMs = (CFAbsoluteTimeGetCurrent() - drawStart) * 1000.0
         log.notice("PERF drawMs=\(String(format: "%.1f", drawMs), privacy: .public)")
 
@@ -543,9 +519,6 @@ enum OfflineScoreColorizer {
                 .intersection(CGRect(x: 0, y: 0, width: w, height: h))
         }()
 
-        var filteredProtectRects: [CGRect] = []
-        filteredProtectRects.reserveCapacity(protectRects.count)
-
         for rect in protectRects {
             guard rect.intersects(protectUnion) else { continue }
             let rw = rect.width
@@ -555,6 +528,8 @@ enum OfflineScoreColorizer {
 
             let aspect = max(rw / max(1, rh), rh / max(1, rw))
             if aspect > 2.2 { continue }
+
+            if rw < 0.25 * u && rh < 0.25 * u { continue }
 
             let fill = rectInkExtent(rect, bin: binary, pageW: w, pageH: h)
             if fill < 0.10 { continue }
@@ -573,10 +548,6 @@ enum OfflineScoreColorizer {
                 if gsm.overlapRatio(with: neighborhood) > 0.12 { continue }
             }
 
-            filteredProtectRects.append(rect)
-        }
-
-        for rect in filteredProtectRects {
             let core = rect.insetBy(dx: -0.45 * u, dy: -0.35 * u)
             let clippedCore = core.intersection(protectUnion)
             markMask(&protectMask, rect: clippedCore, width: w, height: h)
@@ -584,8 +555,7 @@ enum OfflineScoreColorizer {
         let protectMaskMs = (CFAbsoluteTimeGetCurrent() - tP0) * 1000.0
         log.notice("PERF protectMaskMs=\(String(format: "%.1f", protectMaskMs), privacy: .public)")
 
-        let protectPadX = 0.12 * u
-        let protectPadY = 0.26 * u
+        let protectPad = 0.20 * u
         let fullPageRect = CGRect(x: 0, y: 0, width: w, height: h)
         let rois: [CGRect] = systems.isEmpty ? [fullPageRect] : systems.map(\.bbox)
 
@@ -614,8 +584,8 @@ enum OfflineScoreColorizer {
                 base.initialize(repeating: 0, count: qroi.roiW * qroi.roiH)
             }
 
-            for rect in filteredProtectRects {
-                let expanded = rect.insetBy(dx: -protectPadX, dy: -protectPadY)
+            for rect in protectRects {
+                let expanded = rect.insetBy(dx: -protectPad, dy: -protectPad)
                 let clipped = expanded.intersection(roi)
                 guard clipped.width > 0, clipped.height > 0 else { continue }
 
@@ -634,13 +604,6 @@ enum OfflineScoreColorizer {
             }
 
             let protectRectFillMs = (CFAbsoluteTimeGetCurrent() - protectFillStart) * 1000
-
-            if debugMasksEnabled() {
-                var ones = 0
-                for v in verticalScratch.protectExpandedROI where v != 0 { ones += 1 }
-                let frac = Double(ones) / Double(max(1, qroi.roiW * qroi.roiH))
-                log.notice("protectROI roi=\(index, privacy: .public) coverage=\(String(format: "%.3f", frac), privacy: .public)")
-            }
 
             let vres = verticalEraseEnabled()
                 ? VerticalStrokeEraser.eraseStrokes(
@@ -825,6 +788,8 @@ enum OfflineScoreColorizer {
                                                      binaryRawOverride: ([UInt8], Int, Int)?,
                                                      binaryCleanOverride: ([UInt8], Int, Int)?) -> [CGRect] {
             log.notice("filterNoteheadsHighRecall binaryRaw.nil=\(binaryRawOverride == nil, privacy: .public) binaryClean.nil=\(binaryCleanOverride == nil, privacy: .public)")
+            log.error("🚨 USING filterNoteheadsHighRecall_DROPIN 🚨")
+
             guard !noteheads.isEmpty else { return [] }
 
             var rejectStats: [String: Int] = [:]
@@ -833,6 +798,8 @@ enum OfflineScoreColorizer {
                 rejectStats[reason, default: 0] += 1
                 guard debugMasksEnabled(), let rect else { return }
                 rejectedRects.append(DebugRejectedRect(rect: rect, reason: reason))
+                log.notice("REJECT \(reason) rect=\(String(describing: rect))")
+
             }
 
             // If systems not found, only do dedupe (avoid losing notes)
@@ -1048,8 +1015,10 @@ enum OfflineScoreColorizer {
                 }
                 let summary = topReasons.prefix(10).map { "\($0.key)=\($0.value)" }.joined(separator: " | ")
                 log.notice("filterNoteheadsHighRecall rejects=\(summary, privacy: .public)")
-            }
+                log.notice("filterNoteheadsHighRecall kept=\(out.count, privacy: .public) totalIn=\(noteheads.count, privacy: .public)")
 
+            }
+            
             debugRejectedRects = debugMasksEnabled() ? rejectedRects : nil
             return out
         }
@@ -1115,20 +1084,51 @@ enum OfflineScoreColorizer {
                                                  binaryRaw: ([UInt8], Int, Int)?,
                                                  barlineXs: [CGFloat]) -> String? {
 
+        // ------------------------------------------------------------
+        // Scoring philosophy:
+        // - DO NOT hard-reject most things.
+        // - Instead: start score at 1.0 and apply penalties.
+        // - Keep if strong-notehead override OR score >= threshold.
+        // - Only a few truly-obvious cases are hard rejects.
+        // ------------------------------------------------------------
+
+        struct Penalty {
+            let reason: String
+            let amount: Double
+        }
+
+        @inline(__always)
+        func addPenalty(_ list: inout [Penalty], _ reason: String, _ amount: Double) {
+            list.append(Penalty(reason: reason, amount: amount))
+        }
+
+        @inline(__always)
+        func sumPenalties(_ list: [Penalty]) -> Double {
+            list.reduce(0.0) { $0 + $1.amount }
+        }
+
+        // Tuning knobs (start gentle; tighten later)
+        let KEEP_THRESHOLD: Double = 0.62  // gentler = keeps more real heads
+        let STRONG_OVERRIDE_SCORE: Double = 0.72
+
         let rect = head.rect
         let w = rect.width
         let h = rect.height
         if w <= 1 || h <= 1 { return "invalid_size" }
 
-        let aspect = w / max(1.0, h)
+        let u = max(7.0, spacing)
+        let aspect = Double(w / max(1.0, h))
 
-        let inkExtent = head.inkExtent ?? 0
-        let strokeOverlap = head.strokeOverlap ?? (vMask?.overlapRatio(with: rect) ?? 0)
+        let inkExtent = Double(head.inkExtent ?? 0.0)
+        let strokeOverlap = Double(head.strokeOverlap ?? (vMask?.overlapRatio(with: rect) ?? 0.0))
+        let isHeadLike = head.isHeadLike
+        let shapeScore = Double(head.shapeScore)
 
+        // Pull some “line-likeness” and thickness metrics
         var colStem = false
         var lineLike = false
         var ecc: Double = 1.0
-        var thickness: Double = 999
+        var thickness: Double = 999.0
 
         if let binaryClean {
             let (bin, pageW, pageH) = binaryClean
@@ -1139,136 +1139,28 @@ enum OfflineScoreColorizer {
             thickness = meanStrokeThickness(rect, bin: bin, pageW: pageW, pageH: pageH)
         }
 
-        let u = max(7.0, spacing)
-        let overlapExpanded = vMask.map {
+        // Expanded overlap helps detect stem neighborhoods / tails
+        let overlapExpanded: Double = {
+            guard let vMask else { return 0 }
             let expanded = rect.insetBy(dx: -0.35 * u, dy: -0.20 * u).intersection(system.bbox)
-            return Double($0.overlapRatio(with: expanded))
-        } ?? 0
-
-        // If something is very notehead-like, be reluctant to reject it.
-        let strongNotehead = head.shapeScore > 0.72 && strokeOverlap < 0.18 && !colStem
-        let isHeadLike = head.isHeadLike
-
-        // Ledger / staff-line metrics
-        let ledgerMetrics: PatchMetrics? = {
-            guard let binaryClean else { return nil }
-            let (bin, pageW, pageH) = binaryClean
-            let ledgerRect = rect.insetBy(dx: -0.25 * u, dy: -0.10 * u).intersection(system.bbox)
-            return computePatchMetrics(rect: ledgerRect, bin: bin, pageW: pageW, pageH: pageH)
+            return Double(vMask.overlapRatio(with: expanded))
         }()
 
-        if let ledgerMetrics, !strongNotehead {
-            if ledgerMetrics.centerRowMaxRunFrac > 0.70 &&
-                ledgerMetrics.fillRatio < 0.18 &&
-                h < spacing * 0.28 {
-                return "ledger_tiny_line"
-            }
+        // ------------------------------------------------------------
+        // HARD REJECTS (very confident junk only)
+        // ------------------------------------------------------------
 
-            if ledgerMetrics.centerRowMaxRunFrac > RejectTuning.ledgerRunFrac,
-               ledgerMetrics.fillRatio < RejectTuning.ledgerFillMax {
-                return "ledger_line"
-            }
+        // Almost empty contour artifacts
+        if inkExtent < 0.06 { return "low_ink" }
 
-            let distToStaff = minDistanceToAnyStaffLine(y: rect.midY, system: system)
-            let nearStaff = distToStaff < spacing * RejectTuning.staffLineNearFrac
-            let flat = h < spacing * RejectTuning.staffLineFlatMax
-            let wide = w > spacing * RejectTuning.staffLineWideMin
-            if nearStaff && flat && wide &&
-                ledgerMetrics.centerRowMaxRunFrac > RejectTuning.staffLineRunFrac &&
-                ledgerMetrics.fillRatio < RejectTuning.staffLineFillMax {
-                return "staff_line"
-            }
-        }
-
-        if !strongNotehead, let binaryRaw {
-            let (bin, pageW, pageH) = binaryRaw
-            let expanded = rect.insetBy(dx: -0.35 * u, dy: -0.10 * u).intersection(system.bbox)
-            if let runMetrics = computeRowRunMetrics(rect: expanded, bin: bin, pageW: pageW, pageH: pageH) {
-                let heightRatio = rect.height / max(1.0, spacing)
-                if runMetrics.rowsWithLongRunsFrac > 0.35 &&
-                    heightRatio < 0.30 &&
-                    runMetrics.fillRatio < 0.22 {
-                    return "row_runs"
-                }
-            }
-        }
-
-        // Tail-ish metrics
-        let tailMetrics: PatchMetrics? = {
-            guard let binaryClean else { return nil }
-            let (bin, pageW, pageH) = binaryClean
-            let tailRect = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u).intersection(system.bbox)
-            return computePatchMetrics(rect: tailRect, bin: bin, pageW: pageW, pageH: pageH)
-        }()
-
-        if let tailMetrics, !strongNotehead {
-            let isAsymmetric = tailMetrics.lrAsymmetry > RejectTuning.tailAsymMin
-            let isLowFill = tailMetrics.fillRatio < RejectTuning.tailFillMax
-            let axisRatioHit = ecc > RejectTuning.axisRatioMin && tailMetrics.fillRatio < 0.18
-            let overlapHit = overlapExpanded > RejectTuning.overlapExpandedMin && tailMetrics.fillRatio < 0.20
-            if (isLowFill && isAsymmetric) || axisRatioHit || overlapHit {
-                return "tail_metrics"
-            }
-        }
-
-        // Stroke-through veto (diagonal fragments)
-        if !strongNotehead, let binaryClean {
-            let (bin, pageW, pageH) = binaryClean
-            let expanded = rect.insetBy(dx: -0.10 * u, dy: -0.10 * u).intersection(system.bbox)
-            if expanded.width > 1, expanded.height > 1 {
-                let x0 = max(0, Int(floor(expanded.minX)))
-                let y0 = max(0, Int(floor(expanded.minY)))
-                let x1 = min(pageW, Int(ceil(expanded.maxX)))
-                let y1 = min(pageH, Int(ceil(expanded.maxY)))
-
-                var maxRun = 0
-                for x in x0..<x1 {
-                    var run = 0
-                    var gap = 0
-                    for y in y0..<y1 {
-                        let isInk = bin[y * pageW + x] != 0
-                        if isInk {
-                            run += 1
-                            gap = 0
-                            maxRun = max(maxRun, run)
-                        } else {
-                            gap += 1
-                            if gap <= 1 { continue }
-                            run = 0
-                            gap = 0
-                        }
-                    }
-                }
-
-                if Double(maxRun) >= 1.15 * Double(spacing) && inkExtent < 0.30 && ecc > 4.8 {
-                    return "stroke_through"
-                }
-            }
-        }
-
-        // Barline neighborhood veto
-        if barlineVetoEnabled(), !strongNotehead, !barlineXs.isEmpty {
-            let cx = rect.midX
-            let nearBarline = barlineXs.contains { abs($0 - cx) < spacing * 0.12 }
-            if nearBarline {
-                let smallish = max(w, h) < spacing * 0.65
-                if smallish && (strokeOverlap > 0.10 || colStem || lineLike) { return "barline_small" }
-
-                let tallish = h > spacing * 0.60
-                if tallish && strokeOverlap > 0.12 { return "barline_tall" }
-
-                if colStem { return "barline_col_stem" }
-            }
-        }
-
-        // Staccato dots (tiny + high fill)
-        if !strongNotehead {
+        // Staccato dots: tiny + high fill
+        do {
             let tiny = (w < spacing * 0.30) && (h < spacing * 0.30)
             if tiny && inkExtent > 0.55 { return "staccato_dot" }
         }
 
-        // Hanging flat fragments away from staff neighborhoods
-        if !strongNotehead {
+        // Very flat fragments away from staff neighborhoods
+        do {
             let isVeryFlat = (h < spacing * 0.28) && (w > spacing * 1.10)
             if isVeryFlat {
                 let d = minDistanceToAnyStaffLine(y: rect.midY, system: system)
@@ -1276,68 +1168,160 @@ enum OfflineScoreColorizer {
             }
         }
 
-        // Tie/slur-ish: thin + long + line-like
-        if !strongNotehead {
+        // ------------------------------------------------------------
+        // STRONG NOTEHEAD OVERRIDE (do not delete real heads)
+        // ------------------------------------------------------------
+        //
+        // If it's very notehead-like, keep even if it has some stem overlap.
+        // This is the safety net that prevents "all good ones disappear".
+        //
+        let fillGood = (inkExtent > 0.20 && inkExtent < 0.85)
+        let aspectGood = (aspect > 0.65 && aspect < 1.55)
+        let notCrazyLine = (!lineLike && ecc < 6.0)
+        let notPureStem = !colStem
+
+        let strongNotehead =
+            (shapeScore >= STRONG_OVERRIDE_SCORE && fillGood && aspectGood && notPureStem && notCrazyLine)
+         || (isHeadLike && fillGood && aspectGood && notPureStem && notCrazyLine && strokeOverlap < 0.22)
+
+        if strongNotehead {
+            return nil
+        }
+
+
+        // ------------------------------------------------------------
+        // SCORE + PENALTIES
+        // ------------------------------------------------------------
+        var penalties: [Penalty] = []
+        penalties.reserveCapacity(12)
+
+        // 1) Stem/tail overlap penalties (main cleanup)
+        if colStem {
+            addPenalty(&penalties, "col_stem", 0.75)
+        } else if strokeOverlap > 0.26 {
+            addPenalty(&penalties, "stroke_overlap_hi", 0.70)
+        } else if strokeOverlap > 0.18 {
+            addPenalty(&penalties, "stroke_overlap_md", 0.50)
+        } else if strokeOverlap > 0.10 {
+            addPenalty(&penalties, "stroke_overlap_lo", 0.30)
+        }
+
+        if overlapExpanded > 0.28 {
+            addPenalty(&penalties, "overlap_expanded_hi", 0.22)
+        } else if overlapExpanded > 0.18 {
+            addPenalty(&penalties, "overlap_expanded_md", 0.14)
+        }
+
+        // 2) Line-likeness penalties (slurs/ledger fragments)
+        if lineLike && ecc > 6.5 && inkExtent < 0.28 {
+            addPenalty(&penalties, "line_like", 0.35)
+        } else if ecc > 5.5 && thickness < Double(max(1.0, spacing * 0.10)) && inkExtent < 0.32 {
+            addPenalty(&penalties, "thin_line_like", 0.25)
+        }
+        // Beam / stem junction blobs (common source of “rows of circles”)
+        // Beam / stem junction blobs (common source of “rows of circles”)
+        if !strongNotehead, let binaryRaw {
+            let (bin, pageW, pageH) = binaryRaw
+
+            let jRect = rect
+                .insetBy(dx: -0.35 * spacing, dy: -0.35 * spacing)
+                .intersection(system.bbox)
+
+            if hasCrossJunctionSignature(jRect, bin: bin, pageW: pageW, pageH: pageH, spacing: spacing) {
+                return "beam_junction"
+            }
+        }
+
+
+
+        // 3) Tail-ish asymmetry / low-fill signature (use your existing metrics if available)
+        // We'll reuse computePatchMetrics if we can.
+        if let binaryClean {
+            let (bin, pageW, pageH) = binaryClean
+            let tailRect = rect.insetBy(dx: -0.20 * u, dy: -0.20 * u).intersection(system.bbox)
+            if let m = computePatchMetrics(rect: tailRect, bin: bin, pageW: pageW, pageH: pageH) {
+                if m.fillRatio < 0.10 && m.lrAsymmetry > 0.55 {
+                    addPenalty(&penalties, "tail_metrics", 0.35)
+                } else if m.fillRatio < 0.14 && m.lrAsymmetry > 0.45 {
+                    addPenalty(&penalties, "tail_metrics_soft", 0.22)
+                }
+            }
+        }
+
+        // 4) Barline neighborhood penalty (not always reject)
+        if barlineVetoEnabled(), !barlineXs.isEmpty {
+            let cx = rect.midX
+            let nearBarline = barlineXs.contains { abs($0 - cx) < spacing * 0.12 }
+            if nearBarline {
+                // penalize more if skinny/tall, less if blob-like
+                let tallish = (h > spacing * 0.60)
+                let skinny = (aspect < 0.85 || aspect > 1.25)
+                let smallish = max(w, h) < spacing * 0.65
+
+                var p = 0.0
+                if smallish { p += 0.20 }
+                if tallish { p += 0.18 }
+                if skinny { p += 0.18 }
+                if colStem { p += 0.20 }
+                if strokeOverlap > 0.12 { p += 0.15 }
+
+                if p > 0 {
+                    addPenalty(&penalties, "near_barline", min(0.55, p))
+                }
+            }
+        }
+
+        // 5) Mid-gap artifacts between treble/bass (penalty not reject)
+        do {
+            let trebleBottom = system.trebleLines.sorted().last ?? 0
+            let bassTop = system.bassLines.sorted().first ?? 0
+            if rect.midY > trebleBottom && rect.midY < bassTop {
+                let skinny = (aspect < 0.90 || aspect > 1.35)
+                if skinny && (strokeOverlap > 0.06 || colStem || lineLike) {
+                    addPenalty(&penalties, "mid_gap_artifact", 0.22)
+                }
+            }
+        }
+
+        // 6) Tie/slur-ish (penalty)
+        do {
             let longish = max(w, h) > spacing * 0.85
             let thinish = min(w, h) < spacing * 0.28
             let lowFill = inkExtent < 0.28
             let thinStroke = thickness < Double(max(1.0, spacing * 0.10))
-
             if longish && thinish && lowFill && (lineLike || (ecc > 5.5 && thinStroke)) {
-                return "tie_slur"
-            }
-            if longish && (lineLike && ecc > 6.5) && thinStroke {
-                return "tie_slur"
+                addPenalty(&penalties, "tie_slur", 0.26)
             }
         }
 
-        // Stem/tail kill switch
-        if !strongNotehead {
-            if colStem {
-                if h > spacing * 0.26 { return "col_stem" }
+        // 7) If not head-like and very skinny, penalize
+        if !isHeadLike {
+            if aspect < 0.65 || aspect > 1.65 {
+                addPenalty(&penalties, "bad_aspect", 0.18)
             }
-
-            if !isHeadLike {
-                if strokeOverlap > 0.22 && max(w, h) < spacing * 0.60 {
-                    return "stroke_overlap_small"
-                }
-
-                let tallEnough = h > spacing * 0.55
-                let notWide = aspect < 1.05
-                if tallEnough && notWide && strokeOverlap > 0.08 {
-                    return "stroke_overlap_tall"
-                }
-
-                let somewhatSkinny = aspect < 0.85
-                if h > spacing * 0.75 && strokeOverlap > 0.16 && somewhatSkinny {
-                    return "stroke_overlap_skinny"
-                }
-
-                if h > spacing * 1.55 && strokeOverlap > 0.26 {
-                    return "stroke_overlap_very_tall"
-                }
+            if inkExtent < 0.12 {
+                addPenalty(&penalties, "low_fill", 0.22)
             }
+        } else {
+            // If it's head-like, reduce sensitivity to penalties a bit
+            // (we still might reject if it's clearly a stem/line)
+            // Implemented by scaling total penalties down.
         }
 
-        // Mid-gap vertical artifacts (between treble/bass)
-        if !strongNotehead {
-            let trebleBottom = system.trebleLines.sorted().last ?? 0
-            let bassTop = system.bassLines.sorted().first ?? 0
-            if rect.midY > trebleBottom && rect.midY < bassTop {
-                let skinny = aspect < 0.90 || aspect > 1.35
-                if skinny && (strokeOverlap > 0.06 || colStem || lineLike) {
-                    return "mid_gap_artifact"
-                }
-            }
+        var score = 1.0 - sumPenalties(penalties)
+        if isHeadLike { score += 0.10 } // small bump for head-like
+        score = max(0.0, min(1.0, score))
+
+        // Keep if score passes threshold
+        if score >= KEEP_THRESHOLD {
+            return nil
         }
 
-        // Almost empty contour artifacts
-        if !strongNotehead, inkExtent < 0.08 {
-            return "low_ink"
-        }
-
-        return nil
+        // Otherwise, return the most important reason for debug
+        let top = penalties.max(by: { $0.amount < $1.amount })
+        return top?.reason ?? "score_reject"
     }
+
 
     // ------------------------------------------------------------------
     // PATCH METRICS
@@ -1478,24 +1462,26 @@ enum OfflineScoreColorizer {
                                                 spacing: CGFloat,
                                                 binaryRaw: ([UInt8], Int, Int)?) -> [CGRect] {
         guard !barlines.isEmpty, !systems.isEmpty else { return [] }
+
         let widthLimit = max(2.0, 0.12 * spacing)
         let heightFracMin: CGFloat = 0.60
         let runFracMin: CGFloat = 0.55
+
         let systemByRect: (CGRect) -> SystemBlock? = { rect in
             let center = CGPoint(x: rect.midX, y: rect.midY)
-            if let direct = systems.first(where: { $0.bbox.contains(center) }) {
-                return direct
-            }
+            if let direct = systems.first(where: { $0.bbox.contains(center) }) { return direct }
             return systems.first(where: { $0.bbox.intersects(rect) })
         }
 
-        return barlines.compactMap { rect in
+        return barlines.compactMap { rect -> CGRect? in
             guard let system = systemByRect(rect) else { return nil }
+
             let systemHeight = max(1.0, system.bbox.height)
             let heightFrac = rect.height / systemHeight
             if heightFrac < heightFracMin { return nil }
             if rect.width > widthLimit { return nil }
 
+            // If we have a grand staff, ensure barline spans treble->bass area
             if !system.bassLines.isEmpty {
                 let trebleTop = system.trebleLines.min() ?? system.bbox.minY
                 let bassBottom = system.bassLines.max() ?? system.bbox.maxY
@@ -1503,11 +1489,24 @@ enum OfflineScoreColorizer {
                 if rect.maxY < bassBottom + 0.5 * spacing { return nil }
             }
 
+            // Optional beam/stem-junction veto near barlines (return nil if it's junk)
             if let binaryRaw {
                 let (bin, pageW, pageH) = binaryRaw
+
+                // Expand so we "see" junction neighborhood
+                let jRect = rect
+                    .insetBy(dx: -0.35 * spacing, dy: -0.35 * spacing)
+                    .intersection(system.bbox)
+
+                if hasCrossJunctionSignature(jRect, bin: bin, pageW: pageW, pageH: pageH, spacing: spacing) {
+                    return nil
+                }
+
+                // Strong vertical-run check across the system height
                 let x = min(pageW - 1, max(0, Int(rect.midX.rounded())))
                 let y0 = max(0, Int(system.bbox.minY.rounded()))
                 let y1 = min(pageH - 1, Int(system.bbox.maxY.rounded()))
+
                 let longest = max(
                     longestVerticalRun(bin: bin, width: pageW, height: pageH, x: x - 1, y0: y0, y1: y1),
                     max(
@@ -1515,12 +1514,14 @@ enum OfflineScoreColorizer {
                         longestVerticalRun(bin: bin, width: pageW, height: pageH, x: x + 1, y0: y0, y1: y1)
                     )
                 )
+
                 if CGFloat(longest) < runFracMin * systemHeight { return nil }
             }
 
             return rect
         }
     }
+
 
     private static func sanitizeBarlines(_ barlines: [CGRect],
                                          systems: [SystemBlock],
@@ -1649,29 +1650,70 @@ enum OfflineScoreColorizer {
 
         let xBinWidth = max(2.0, spacing * 0.60)
 
-        var bestByKey: [String: ScoredHead] = [:]
+        // Use a tuple key (Hashable) instead of String for speed + determinism.
+        struct Key: Hashable {
+            let step: Int
+            let xBin: Int
+        }
+
+        var bestByKey: [Key: ScoredHead] = [:]
         bestByKey.reserveCapacity(heads.count)
 
+        @inline(__always)
         func compositeScore(_ h: ScoredHead) -> Double {
-            return Double(h.compositeScore)
+            Double(h.compositeScore)
         }
 
         for h in heads {
             guard let step = h.staffStepIndex else { continue }
             let xBin = Int((h.rect.midX / xBinWidth).rounded())
-            let key = "\(step)|\(xBin)"
+            let key = Key(step: step, xBin: xBin)
 
             if let cur = bestByKey[key] {
-                if compositeScore(h) > compositeScore(cur) {
+                // Tie-breakers ensure determinism even when scores match closely.
+                let a = compositeScore(h)
+                let b = compositeScore(cur)
+                if a > b {
                     bestByKey[key] = h
+                } else if a == b {
+                    // Prefer the smaller area, then leftmost, then topmost (stable)
+                    let areaH = h.rect.width * h.rect.height
+                    let areaC = cur.rect.width * cur.rect.height
+                    if areaH < areaC ||
+                        (areaH == areaC && (h.rect.midX < cur.rect.midX ||
+                                            (h.rect.midX == cur.rect.midX && h.rect.midY < cur.rect.midY))) {
+                        bestByKey[key] = h
+                    }
                 }
             } else {
                 bestByKey[key] = h
             }
         }
 
-        return bestByKey.values.map { $0.rect }
+        // Deterministic output ordering:
+        // 1) staff step (vertical musical order), 2) xBin, 3) midX, 4) midY
+        let sortedKeys = bestByKey.keys.sorted {
+            if $0.step != $1.step { return $0.step < $1.step }
+            if $0.xBin != $1.xBin { return $0.xBin < $1.xBin }
+            return false
+        }
+
+        var out: [CGRect] = []
+        out.reserveCapacity(sortedKeys.count)
+
+        for k in sortedKeys {
+            if let h = bestByKey[k] { out.append(h.rect) }
+        }
+
+        // Final stable sort for drawing (so even same step/bin is consistent)
+        out.sort {
+            if $0.midY != $1.midY { return $0.midY < $1.midY }
+            return $0.midX < $1.midX
+        }
+
+        return out
     }
+
 
     // ------------------------------------------------------------------
     // DRAWING / DEBUG OVERLAY
@@ -2012,6 +2054,69 @@ enum OfflineScoreColorizer {
         let area = max(1, (x1 - x0) * (y1 - y0))
         return CGFloat(ink) / CGFloat(area)
     }
+    private static func hasCrossJunctionSignature(_ rect: CGRect,
+                                                  bin: [UInt8],
+                                                  pageW: Int,
+                                                  pageH: Int,
+                                                  spacing: CGFloat) -> Bool {
+        let u = max(7.0, spacing)
+        let clipped = rect.insetBy(dx: -0.15 * u, dy: -0.15 * u)
+            .intersection(CGRect(x: 0, y: 0, width: pageW, height: pageH))
+        guard clipped.width >= 6, clipped.height >= 6 else { return false }
+
+        let x0 = max(0, Int(floor(clipped.minX)))
+        let y0 = max(0, Int(floor(clipped.minY)))
+        let x1 = min(pageW, Int(ceil(clipped.maxX)))
+        let y1 = min(pageH, Int(ceil(clipped.maxY)))
+
+        // sample around the rect center
+        let cx = min(pageW - 1, max(0, Int(rect.midX.rounded())))
+        let cy = min(pageH - 1, max(0, Int(rect.midY.rounded())))
+
+        // measure longest horizontal run through/near center
+        var bestH = 0
+        for yy in max(y0, cy - 1)...min(y1 - 1, cy + 1) {
+            var run = 0
+            var maxRun = 0
+            for xx in x0..<x1 {
+                if bin[yy * pageW + xx] != 0 {
+                    run += 1
+                    maxRun = max(maxRun, run)
+                } else {
+                    run = 0
+                }
+            }
+            bestH = max(bestH, maxRun)
+        }
+
+        // measure longest vertical run through/near center
+        var bestV = 0
+        for xx in max(x0, cx - 1)...min(x1 - 1, cx + 1) {
+            var run = 0
+            var maxRun = 0
+            for yy in y0..<y1 {
+                if bin[yy * pageW + xx] != 0 {
+                    run += 1
+                    maxRun = max(maxRun, run)
+                } else {
+                    run = 0
+                }
+            }
+            bestV = max(bestV, maxRun)
+        }
+
+        // Thresholds: beam junctions tend to have both.
+        // True noteheads: horizontal presence yes, but vertical "stem-like" run across center is usually weaker
+        let hHit = Double(bestH) > 0.85 * Double(min(x1 - x0, Int((1.2 * u).rounded())))
+        let vHit = Double(bestV) > 0.75 * Double(min(y1 - y0, Int((1.2 * u).rounded())))
+
+        // And they’re usually thin-ish ink overall (junction, not filled ellipse)
+        let fill = rectInkExtent(rect, bin: bin, pageW: pageW, pageH: pageH)
+        let lowFill = fill < 0.28
+
+        return hHit && vHit && lowFill
+    }
+
 
     // ------------------------------------------------------------------
     // STEM DETECTOR VIA COLUMN DOMINANCE

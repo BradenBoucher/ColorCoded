@@ -1,73 +1,120 @@
-import CoreGraphics
 import Foundation
+import CoreGraphics
 
+/// Suppresses tiny clustered detections (common around stems/tails/beam junk).
+/// Provides overloads for both CGRect and ScoredHead, so call sites can stay unchanged.
 enum ClusterSuppressor {
 
-    static func suppress(_ candidates: [ScoredHead], spacing: CGFloat) -> [ScoredHead] {
-        guard !candidates.isEmpty else { return [] }
+    // MARK: - Public (CGRect)
 
-        // Prefer best overall (staff-fit + shape), not just gate.
-        let sorted = candidates.sorted { a, b in
-            if a.compositeScore != b.compositeScore { return a.compositeScore > b.compositeScore }
-            // deterministic tie-breakers reduce "identical rows treated differently"
-            if a.rect.midX != b.rect.midX { return a.rect.midX < b.rect.midX }
-            return a.rect.midY < b.rect.midY
+    static func suppress(_ rects: [CGRect], spacing: CGFloat) -> [CGRect] {
+        guard rects.count > 1 else { return rects }
+        let s = max(6.0, spacing)
+
+        let tinyAreaMax = (s * s) * 0.18
+        let clusterRadius = max(6.0, s * 0.85)
+        let minNeighborsToKill = 3
+
+        var tiny: [CGRect] = []
+        var big: [CGRect] = []
+        tiny.reserveCapacity(rects.count)
+        big.reserveCapacity(rects.count)
+
+        for r in rects {
+            let a = r.width * r.height
+            if a <= tinyAreaMax { tiny.append(r) } else { big.append(r) }
         }
 
-        var kept: [ScoredHead] = []
-        kept.reserveCapacity(sorted.count)
+        guard !tiny.isEmpty else { return rects }
 
-        // Close-in-X = same "time slice"
-        let dxThresh = spacing * 0.42
+        var kill = [Bool](repeating: false, count: tiny.count)
 
-        // Very tight Y = truly duplicate, not a chord
-        let dupDyThresh = spacing * 0.12
+        for i in 0..<tiny.count {
+            let ci = CGPoint(x: tiny[i].midX, y: tiny[i].midY)
+            var neighbors = 0
+            for j in 0..<tiny.count where j != i {
+                let cj = CGPoint(x: tiny[j].midX, y: tiny[j].midY)
+                let dx = ci.x - cj.x
+                let dy = ci.y - cj.y
+                if (dx*dx + dy*dy) <= clusterRadius * clusterRadius {
+                    neighbors += 1
+                    if neighbors >= minNeighborsToKill { break }
+                }
+            }
+            if neighbors >= minNeighborsToKill { kill[i] = true }
+        }
 
-        // If step indices exist, allow chords: stacked notes differ by >= 2 steps typically
-        let minChordStepDiff = 2
+        var keptTiny: [CGRect] = []
+        keptTiny.reserveCapacity(tiny.count)
+        for i in 0..<tiny.count where !kill[i] { keptTiny.append(tiny[i]) }
 
-        for cand in sorted {
-            let cx = cand.rect.midX
-            let cy = cand.rect.midY
+        return big + keptTiny
+    }
 
-            var keep = true
-            for k in kept {
-                let kx = k.rect.midX
-                let ky = k.rect.midY
+    // MARK: - Public (ScoredHead)
 
-                let dx = abs(cx - kx)
-                if dx > dxThresh { continue }
+    /// Cluster-kill tiny detections, but keep ONE best element per dense neighborhood.
+    static func suppress(_ heads: [ScoredHead], spacing: CGFloat) -> [ScoredHead] {
+        guard heads.count > 1 else { return heads }
+        let s = max(6.0, spacing)
 
-                let dy = abs(cy - ky)
+        let tinyAreaMax = (s * s) * 0.18
+        let clusterRadius = max(6.0, s * 0.85)
+        let minNeighborsToKill = 3
 
-                // If both have step indices, only suppress when they represent the SAME step
-                if let s1 = cand.staffStepIndex, let s2 = k.staffStepIndex {
-                    if s1 == s2 {
-                        keep = false
-                        break
-                    }
-                    // If they're different steps enough, it's probably a chord stack -> keep
-                    if abs(s1 - s2) >= minChordStepDiff {
-                        continue
-                    }
-                    // Small step diff (0 or 1) can still be a duplicate or a tight cluster.
-                    // Use very-tight dy to suppress only true duplicates.
-                    if dy < dupDyThresh {
-                        keep = false
-                        break
-                    }
-                } else {
-                    // No step info: suppress only if extremely close in Y (duplicate), not just "near"
-                    if dy < dupDyThresh {
-                        keep = false
-                        break
-                    }
+        var tiny: [ScoredHead] = []
+        var big: [ScoredHead] = []
+        tiny.reserveCapacity(heads.count)
+        big.reserveCapacity(heads.count)
+
+        for h in heads {
+            let r = h.rect
+            let a = r.width * r.height
+            if a <= tinyAreaMax { tiny.append(h) } else { big.append(h) }
+        }
+
+        guard !tiny.isEmpty else { return heads }
+
+        // Identify dense tiny clusters. Keep best score in each local neighborhood.
+        var kill = [Bool](repeating: false, count: tiny.count)
+
+        for i in 0..<tiny.count {
+            let ri = tiny[i].rect
+            let ci = CGPoint(x: ri.midX, y: ri.midY)
+
+            var neighborIdxs: [Int] = []
+            neighborIdxs.reserveCapacity(8)
+
+            for j in 0..<tiny.count where j != i {
+                let rj = tiny[j].rect
+                let cj = CGPoint(x: rj.midX, y: rj.midY)
+                let dx = ci.x - cj.x
+                let dy = ci.y - cj.y
+                if (dx*dx + dy*dy) <= clusterRadius * clusterRadius {
+                    neighborIdxs.append(j)
                 }
             }
 
-            if keep { kept.append(cand) }
+            if neighborIdxs.count >= minNeighborsToKill {
+                // best among i + neighbors
+                var bestIndex = i
+                var bestScore = tiny[i].compositeScore
+                for j in neighborIdxs {
+                    let sc = tiny[j].compositeScore
+                    if sc > bestScore {
+                        bestScore = sc
+                        bestIndex = j
+                    }
+                }
+                if bestIndex != i { kill[i] = true }
+            }
         }
 
-        return kept
+        var keptTiny: [ScoredHead] = []
+        keptTiny.reserveCapacity(tiny.count)
+        for i in 0..<tiny.count where !kill[i] { keptTiny.append(tiny[i]) }
+
+        // NOTE: stable output order: big first, then tiny
+        return big + keptTiny
     }
 }

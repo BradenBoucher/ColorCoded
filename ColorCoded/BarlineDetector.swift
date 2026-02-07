@@ -58,7 +58,7 @@ enum BarlineDetector {
             let sy1 = min(h - 1, Int(ceil(system.bbox.maxY)))
             if sx1 <= sx0 || sy1 <= sy0 { continue }
 
-            let sysH = max(1, sy1 - sy0 + 1)
+           // let sysH = max(1, sy1 - sy0 + 1)
 
             // Ignore left symbol zone (clef / key / time)
             // roughly: 30–40% of system width or ~8*spacing

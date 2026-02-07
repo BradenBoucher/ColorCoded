@@ -53,7 +53,7 @@ enum BinaryConnectedComponents {
             scratch.visited.withUnsafeMutableBufferPointer { buf in
                 guard let base = buf.baseAddress else { return }
                 let start = row + x0
-                base.advanced(by: start).assign(repeating: 0, count: x1 - x0)
+                base.advanced(by: start).update(repeating: 0, count: x1 - x0)
             }
         }
         var components: [Component] = []
