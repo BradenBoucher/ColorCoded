@@ -28,10 +28,17 @@ enum HorizontalStrokeEraser {
         // Tunables (high-recall, protect-aware)
         let minRun = max(14, Int((3.8 * u).rounded()))                 // long enough to be a stroke/beam/tie fragment
         let minStaffRun = max(18, Int((6.0 * u).rounded()))            // extra-long straight lines (staff leftovers)
+        let minCurveRun = minRun
         let maxHalfThickness = max(1, Int((0.10 * u).rounded()))       // thickness band half-width (so 2*+1 total)
         let protectMaxFrac: Double = 0.14                              // allow more protect overlap than before
         let protectErodeR = max(1, Int((0.06 * u).rounded()))          // shrink protect just for this pass
         let staffExclusion = spacing * 0.18                            // "near staff line" distance
+        let tieBand = maxHalfThickness
+
+        let beamMinRun = max(14, Int((3.0 * u).rounded()))
+        let beamStaffDist = spacing * 0.35
+        let beamProtectMaxFrac: Double = 0.05
+        let beamMaxThickness = max(2, Int((0.14 * u).rounded()))
         
         let clipped = roi.intersection(CGRect(x: 0, y: 0, width: width, height: height))
         guard clipped.width > 2, clipped.height > 2 else {
@@ -78,21 +85,6 @@ enum HorizontalStrokeEraser {
         }
         
         @inline(__always)
-        func localVerticalInkBulk(x: Int, y: Int) -> Int {
-            // Counts ink in a taller window; noteheads have much more vertical bulk than ties/beams.
-            let halfH = max(2, Int((0.35 * u).rounded()))
-            let yy0 = max(0, y - halfH)
-            let yy1 = min(height - 1, y + halfH)
-            var c = 0
-            var yy = yy0
-            while yy <= yy1 {
-                if out[yy * width + x] != 0 { c += 1 }
-                yy += 1
-            }
-            return c
-        }
-        
-        @inline(__always)
         func maxThicknessAt(x: Int, y: Int) -> Int {
             // Measure thickness in a tight band around y (ties/beams should be thin)
             var t = 0
@@ -104,6 +96,35 @@ enum HorizontalStrokeEraser {
                 yy += 1
             }
             return t
+        }
+
+        @inline(__always)
+        func isStraightRun(runStart: Int, runEnd: Int, y: Int) -> Bool {
+            var minOffset = Int.max
+            var maxOffset = Int.min
+            var samples = 0
+            var sx = runStart
+            while sx < runEnd {
+                var sum = 0
+                var count = 0
+                for dy in -tieBand...tieBand {
+                    let yy = y + dy
+                    if yy < 0 || yy >= height { continue }
+                    if out[yy * width + sx] != 0 {
+                        sum += dy
+                        count += 1
+                    }
+                }
+                if count > 0 {
+                    let avgOffset = Int(round(Double(sum) / Double(count)))
+                    minOffset = min(minOffset, avgOffset)
+                    maxOffset = max(maxOffset, avgOffset)
+                    samples += 1
+                }
+                sx += 2
+            }
+            if samples < 3 { return true }
+            return (maxOffset - minOffset) <= 1
         }
         
         // Fast gate: scan a few rows for a run >= minRun
@@ -162,35 +183,59 @@ enum HorizontalStrokeEraser {
                 var protectHits = 0
                 var inkSamples = 0
                 var maxT = 0
-                var bulkHits = 0
-                
                 var sx = runStart
                 while sx < runEnd {
                     inkSamples += 1
                     if isProtectedEroded(x: sx, y: y) { protectHits += 1 }
                     maxT = max(maxT, maxThicknessAt(x: sx, y: y))
-                    
-                    // Noteheads have larger vertical ink bulk around their center columns.
-                    if localVerticalInkBulk(x: sx, y: y) >= Int((0.55 * u).rounded()) {
-                        bulkHits += 1
-                    }
                     sx += 2
                 }
                 
                 let protectFrac = Double(protectHits) / Double(max(1, inkSamples))
-                let bulkFrac = Double(bulkHits) / Double(max(1, inkSamples))
                 
-                // Thinness test
-                let allowedThickness = (2 * maxHalfThickness + 1)
-                let isThin = maxT <= allowedThickness
-                
-                // If too much vertical bulk along the run, it’s likely cutting through heads (beam+head area).
-                // Don’t erase those; let vertical eraser + later filtering handle.
-                let looksHeadAdjacent = bulkFrac >= 0.22
-                
-                // Qualify: long + thin + not-too-protected + not head-adjacent
-                if isThin && !looksHeadAdjacent && protectFrac <= protectMaxFrac {
-                    let band = max(1, maxHalfThickness)
+                let isStraight = isStraightRun(runStart: runStart, runEnd: runEnd, y: y)
+
+                // Two thickness interpretations:
+                // - tie/slur: very thin
+                let isThinTie = maxT <= (2 * maxHalfThickness + 1)
+
+                // - beam: can be thicker
+                let isThinBeam = maxT <= (2 * beamMaxThickness + 1)
+
+                // Qualify as a curved band (ties/slurs)
+                var isCurvedBand = false
+                if runLen >= minCurveRun && isThinTie {
+                    var bandHits = 0
+                    var bandSamples = 0
+                    var sx = runStart
+                    while sx < runEnd {
+                        bandSamples += 1
+                        var found = false
+                        for dy in -tieBand...tieBand {
+                            let yy = y + dy
+                            if yy < 0 || yy >= height { continue }
+                            if out[yy * width + sx] != 0 { found = true; break }
+                        }
+                        if found { bandHits += 1 }
+                        sx += 2
+                    }
+                    let bandFrac = Double(bandHits) / Double(max(1, bandSamples))
+                    isCurvedBand = bandFrac >= 0.65
+                }
+
+                // NEW: qualify straight “beam-like” runs too
+                let distToStaff = distanceToNearestStaffLine(y: y)
+                let qualifiesTie = isCurvedBand && protectFrac <= protectMaxFrac && isThinTie
+
+                let qualifiesBeam =
+                    isStraight &&
+                    runLen >= beamMinRun &&
+                    distToStaff >= beamStaffDist &&
+                    isThinBeam &&
+                    protectFrac <= beamProtectMaxFrac
+
+                if (qualifiesTie || qualifiesBeam) {
+                    let band = max(1, qualifiesBeam ? beamMaxThickness : maxHalfThickness)
                     let yy0 = max(0, y - band)
                     let yy1 = min(height - 1, y + band)
                     var yy = yy0
