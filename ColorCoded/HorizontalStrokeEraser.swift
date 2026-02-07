@@ -161,6 +161,10 @@ enum HorizontalStrokeEraser {
         }
         
         var erased = 0
+        var beamQualifiedRuns = 0
+        var tieQualifiedRuns = 0
+        var beamErasedPixels = 0
+        var tieErasedPixels = 0
         
         // Main scan (row-by-row inside ROI)
         for y in y0..<y1 {
@@ -237,6 +241,9 @@ enum HorizontalStrokeEraser {
                     isThinBeam &&
                     protectFrac <= beamProtectMaxFrac
 
+                if qualifiesTie { tieQualifiedRuns += 1 }
+                if qualifiesBeam { beamQualifiedRuns += 1 }
+
                 if (qualifiesTie || qualifiesBeam) {
                     let band = max(1, qualifiesBeam ? beamMaxThickness : maxHalfThickness)
                     let yy0 = max(0, y - band)
@@ -250,6 +257,7 @@ enum HorizontalStrokeEraser {
                                 out[row + xx] = 0
                                 mask[row + xx] = 1
                                 erased += 1
+                                if qualifiesBeam { beamErasedPixels += 1 } else { tieErasedPixels += 1 }
                             }
                         }
                         yy += 1
@@ -268,7 +276,7 @@ enum HorizontalStrokeEraser {
                           erasedCount: 0)
         }
         
-        log.notice("eraseHorizontalRuns done erasedPixels=\(erased, privacy: .public)")
+        log.notice("eraseHorizontalRuns done erasedPixels=\(erased, privacy: .public) tieRuns=\(tieQualifiedRuns, privacy: .public) beamRuns=\(beamQualifiedRuns, privacy: .public) tieErased=\(tieErasedPixels, privacy: .public) beamErased=\(beamErasedPixels, privacy: .public)")
         return Result(binaryWithoutHorizontals: out, horizMask: mask, erasedCount: erased)
     }
     
