@@ -36,9 +36,10 @@ enum HorizontalStrokeEraser {
         let tieBand = maxHalfThickness
 
         let beamMinRun = max(14, Int((3.0 * u).rounded()))
-        let beamStaffDist = spacing * 0.35
-        let beamProtectMaxFrac: Double = 0.05
-        let beamMaxThickness = max(2, Int((0.14 * u).rounded()))
+        let beamStaffDist = spacing * 0.10              // was 0.35
+        let beamProtectMaxFrac: Double = 0.20           // was 0.05
+        let beamMaxThickness = max(2, Int((0.22 * u).rounded())) // was 0.14*u
+
         
         let clipped = roi.intersection(CGRect(x: 0, y: 0, width: width, height: height))
         guard clipped.width > 2, clipped.height > 2 else {
@@ -66,23 +67,25 @@ enum HorizontalStrokeEraser {
         // Simple circular-ish neighborhood check with small radius; cheap because we only read protect.
         @inline(__always)
         func isProtectedEroded(x: Int, y: Int) -> Bool {
-            // If ANY protect pixel exists within radius, treat as protected.
-            // Erosion effect comes from using smaller neighborhood than your protect-dilation elsewhere.
+            // Erode: require the *entire* neighborhood to be protected.
+            // If there is ANY gap in protectMask nearby, treat as NOT protected.
             let r = protectErodeR
             let yy0 = max(0, y - r), yy1 = min(height - 1, y + r)
             let xx0 = max(0, x - r), xx1 = min(width - 1, x + r)
+
             var yy = yy0
             while yy <= yy1 {
                 let row = yy * width
                 var xx = xx0
                 while xx <= xx1 {
-                    if protectMask[row + xx] != 0 { return true }
+                    if protectMask[row + xx] == 0 { return false }
                     xx += 1
                 }
                 yy += 1
             }
-            return false
+            return true
         }
+
         
         @inline(__always)
         func maxThicknessAt(x: Int, y: Int) -> Int {
