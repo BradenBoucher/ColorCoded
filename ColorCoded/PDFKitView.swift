@@ -17,7 +17,10 @@ struct PDFKitView: UIViewRepresentable {
     }
 
     func updateUIView(_ pdfView: PDFView, context: Context) {
-        pdfView.document = PDFDocument(url: url)
+        guard pdfView.document?.documentURL != url else { return }
+        DispatchQueue.main.async {
+            pdfView.document = PDFDocument(url: url)
+        }
     }
 }
 
@@ -37,7 +40,10 @@ struct PDFKitView: NSViewRepresentable {
     }
 
     func updateNSView(_ pdfView: PDFView, context: Context) {
-        pdfView.document = PDFDocument(url: url)
+        guard pdfView.document?.documentURL != url else { return }
+        DispatchQueue.main.async {
+            pdfView.document = PDFDocument(url: url)
+        }
     }
 }
 #endif
