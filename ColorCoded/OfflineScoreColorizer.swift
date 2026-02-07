@@ -112,14 +112,28 @@ enum OfflineScoreColorizer {
         }
 
         @inline(__always)
+        func _hasOverlap(_ r: CGRect, _ refs: [CGRect], thr: CGFloat) -> Bool {
+            for e in refs {
+                if _iou(r, e) >= thr { return true }
+            }
+            return false
+        }
+
+        @inline(__always)
         func _insideAnySystem(_ p: CGPoint) -> Bool {
             for s in systems { if s.bbox.contains(p) { return true } }
             return false
         }
 
-        // Seed with protect baseline
-        var merged = protectNoteRects
-        let protectCount = merged.count
+        // Seed with protect baseline, but CONFIRM it with CCL results (removes beam junk)
+        var merged: [CGRect] = []
+        merged.reserveCapacity(protectNoteRects.count)
+
+        let protectCount = protectNoteRects.count
+
+        // We'll fill these after pass2 runs:
+        var pass2Clean: [CGRect] = []
+        var pass2Raw: [CGRect] = []
 
         func _mergeMopUp(_ mop: [CGRect]) {
             guard !mop.isEmpty else { return }
@@ -136,33 +150,44 @@ enum OfflineScoreColorizer {
         }
 
         if let cleanedBinary {
-            let pass2Clean = await NoteheadDetector.detectNoteheads(
+            pass2Clean = await NoteheadDetector.detectNoteheads(
                 in: image,
                 contoursBinaryOverride: cleanedBinary,
                 systems: systems
             )
             pass2CleanCount = pass2Clean.count
-            _mergeMopUp(pass2Clean)
 
             let rawFallbackThreshold = max(1, Int(ceil(Double(max(1, protectCount)) * 0.92)))
             if pass2Clean.count < rawFallbackThreshold, let rb = rawBinary {
-                let pass2Raw = await NoteheadDetector.detectNoteheads(
+                pass2Raw = await NoteheadDetector.detectNoteheads(
                     in: image,
                     contoursBinaryOverride: rb,
                     systems: systems
                 )
                 pass2RawCount = pass2Raw.count
-                _mergeMopUp(pass2Raw)
             }
         } else if let rb = rawBinary {
-            let pass2Raw = await NoteheadDetector.detectNoteheads(
+            pass2Raw = await NoteheadDetector.detectNoteheads(
                 in: image,
                 contoursBinaryOverride: rb,
                 systems: systems
             )
             pass2RawCount = pass2Raw.count
-            _mergeMopUp(pass2Raw)
         }
+
+        let confirmRefs = !pass2Clean.isEmpty ? pass2Clean : pass2Raw
+        let confirmThr: CGFloat = 0.10
+
+        for r in protectNoteRects {
+            if _hasOverlap(r, confirmRefs, thr: confirmThr) {
+                merged.append(r)
+            }
+        }
+
+        log.notice("protect confirmed=\(merged.count, privacy: .public) of rawProtect=\(protectCount, privacy: .public)")
+
+        _mergeMopUp(pass2Clean)
+        _mergeMopUp(pass2Raw)
 
         let noteRects = merged
 
