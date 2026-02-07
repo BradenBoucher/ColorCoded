@@ -502,6 +502,9 @@ enum OfflineScoreColorizer {
                 .intersection(CGRect(x: 0, y: 0, width: w, height: h))
         }()
 
+        var filteredProtectRects: [CGRect] = []
+        filteredProtectRects.reserveCapacity(protectRects.count)
+
         for rect in protectRects {
             guard rect.intersects(protectUnion) else { continue }
             let rw = rect.width
@@ -511,8 +514,6 @@ enum OfflineScoreColorizer {
 
             let aspect = max(rw / max(1, rh), rh / max(1, rw))
             if aspect > 2.2 { continue }
-
-            if rw < 0.25 * u && rh < 0.25 * u { continue }
 
             let fill = rectInkExtent(rect, bin: binary, pageW: w, pageH: h)
             if fill < 0.10 { continue }
@@ -531,6 +532,10 @@ enum OfflineScoreColorizer {
                 if gsm.overlapRatio(with: neighborhood) > 0.12 { continue }
             }
 
+            filteredProtectRects.append(rect)
+        }
+
+        for rect in filteredProtectRects {
             let core = rect.insetBy(dx: -0.45 * u, dy: -0.35 * u)
             let clippedCore = core.intersection(protectUnion)
             markMask(&protectMask, rect: clippedCore, width: w, height: h)
@@ -538,7 +543,8 @@ enum OfflineScoreColorizer {
         let protectMaskMs = (CFAbsoluteTimeGetCurrent() - tP0) * 1000.0
         log.notice("PERF protectMaskMs=\(String(format: "%.1f", protectMaskMs), privacy: .public)")
 
-        let protectPad = 0.20 * u
+        let protectPadX = 0.12 * u
+        let protectPadY = 0.26 * u
         let fullPageRect = CGRect(x: 0, y: 0, width: w, height: h)
         let rois: [CGRect] = systems.isEmpty ? [fullPageRect] : systems.map(\.bbox)
 
@@ -567,8 +573,8 @@ enum OfflineScoreColorizer {
                 base.initialize(repeating: 0, count: qroi.roiW * qroi.roiH)
             }
 
-            for rect in protectRects {
-                let expanded = rect.insetBy(dx: -protectPad, dy: -protectPad)
+            for rect in filteredProtectRects {
+                let expanded = rect.insetBy(dx: -protectPadX, dy: -protectPadY)
                 let clipped = expanded.intersection(roi)
                 guard clipped.width > 0, clipped.height > 0 else { continue }
 
@@ -587,6 +593,13 @@ enum OfflineScoreColorizer {
             }
 
             let protectRectFillMs = (CFAbsoluteTimeGetCurrent() - protectFillStart) * 1000
+
+            if debugMasksEnabled() {
+                var ones = 0
+                for v in verticalScratch.protectExpandedROI where v != 0 { ones += 1 }
+                let frac = Double(ones) / Double(max(1, qroi.roiW * qroi.roiH))
+                log.notice("protectROI roi=\(index, privacy: .public) coverage=\(String(format: "%.3f", frac), privacy: .public)")
+            }
 
             let vres = verticalEraseEnabled()
                 ? VerticalStrokeEraser.eraseStrokes(
