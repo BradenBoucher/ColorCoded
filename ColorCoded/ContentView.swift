@@ -108,27 +108,35 @@ struct ContentView: View {
                 guard let url = urls.first else { return }
                 do {
                     let localURL = try FileImportHelper.copyToSandbox(url)
-                    pickedPDFURL = localURL
-                    coloredPDFURL = nil
-                    status = "Loaded PDF. Ready to colorize offline."
+                    DispatchQueue.main.async {
+                        pickedPDFURL = localURL
+                        coloredPDFURL = nil
+                        status = "Loaded PDF. Ready to colorize offline."
+                    }
                 } catch {
-                    status = "Failed: \(error.localizedDescription)"
+                    DispatchQueue.main.async {
+                        status = "Failed: \(error.localizedDescription)"
+                    }
                 }
             case .failure(let error):
-                status = "Import failed: \(error.localizedDescription)"
+                DispatchQueue.main.async {
+                    status = "Import failed: \(error.localizedDescription)"
+                }
             }
         }
 #if os(iOS)
         .sheet(isPresented: $showScanner) {
             DocumentScannerView { scannedPDFURL in
-                if let scannedPDFURL {
-                    pickedPDFURL = scannedPDFURL
-                    coloredPDFURL = nil
-                    status = "Scanned PDF ready. Ready to colorize offline."
-                } else {
-                    status = "Scan cancelled."
+                DispatchQueue.main.async {
+                    if let scannedPDFURL {
+                        pickedPDFURL = scannedPDFURL
+                        coloredPDFURL = nil
+                        status = "Scanned PDF ready. Ready to colorize offline."
+                    } else {
+                        status = "Scan cancelled."
+                    }
+                    showScanner = false
                 }
-                showScanner = false
             }
         }
 #endif
@@ -136,17 +144,25 @@ struct ContentView: View {
 
     private func runOfflineColorize() async {
         guard let input = pickedPDFURL else { return }
-        isProcessing = true
-        status = "Processing pages on-device…"
+        DispatchQueue.main.async {
+            isProcessing = true
+            status = "Processing pages on-device…"
+        }
 
         do {
             let outURL = try await OfflineScoreColorizer.colorizePDF(inputURL: input)
-            coloredPDFURL = outURL
-            status = "Done ✅ (offline)"
+            DispatchQueue.main.async {
+                coloredPDFURL = outURL
+                status = "Done ✅ (offline)"
+            }
         } catch {
-            status = "Failed: \(error.localizedDescription)"
+            DispatchQueue.main.async {
+                status = "Failed: \(error.localizedDescription)"
+            }
         }
 
-        isProcessing = false
+        DispatchQueue.main.async {
+            isProcessing = false
+        }
     }
 }
