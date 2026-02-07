@@ -29,9 +29,10 @@ enum HorizontalStrokeEraser {
         let minRun = max(16, Int((5.0 * u).rounded()))           // require long runs
         let minCurveRun = max(12, Int((3.5 * u).rounded()))      // allow mild curvature
         let maxThickness = max(1, Int((0.08 * u).rounded()))     // strict thickness cutoff
-        let protectMaxFrac: Double = 0.08                        // don't erase if too protected
+        let protectMaxFrac: Double = 0.10                        // don't erase if too protected
         let tieBand = max(1, Int((0.10 * u).rounded()))
-        let staffExclusion = spacing * 0.18
+        let staffExclusion = spacing * 0.14
+        let straightAllowDistance = spacing * 0.30
 
         let clipped = roi.intersection(CGRect(x: 0, y: 0, width: width, height: height))
         var out = binary
@@ -45,8 +46,8 @@ enum HorizontalStrokeEraser {
         let x1 = min(width, Int(ceil(clipped.maxX)))
         let y1 = min(height, Int(ceil(clipped.maxY)))
 
-        let sampleStep = 4
-        let gateThreshold = minRun
+        let sampleStep = 1
+        let gateThreshold = max(8, minRun / 2)
         var foundRun = false
 
         if (x1 - x0) > 0 && (y1 - y0) > 0 {
@@ -190,7 +191,9 @@ enum HorizontalStrokeEraser {
                     isCurvedBand = bandFrac >= 0.65
                 }
 
-                let qualifies = (runLen >= minRun || isCurvedBand) && !isStraight
+                let staffDistance = distanceToNearestStaffLine(y: y)
+                let qualifies = (runLen >= minRun || isCurvedBand) &&
+                    (!isStraight || staffDistance >= straightAllowDistance)
 
                 // Erase if thin and not protected (extra guard near staff lines)
                 if qualifies && isThin && protectFrac <= protectMaxFrac {
