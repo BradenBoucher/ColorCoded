@@ -991,8 +991,18 @@ enum OfflineScoreColorizer {
                     return kept
                 }
 
+                let rowSuppressed = suppressRowRunArtifacts(
+                    pruned,
+                    spacing: spacing,
+                    binaryClean: binaryClean,
+                    binaryRaw: binaryRaw,
+                    onReject: { rect in
+                        recordReject("row_run_band", rect)
+                    }
+                )
+
                 // Consolidate (stepIndex + X bin) keeps true head, drops duplicates
-                let consolidated = consolidateByStepAndX(pruned, spacing: spacing)
+                let consolidated = consolidateByStepAndX(rowSuppressed, spacing: spacing)
 
                 // Final light dedupe
                 let deduped = DuplicateSuppressor.suppress(consolidated, spacing: spacing)
@@ -1218,6 +1228,14 @@ enum OfflineScoreColorizer {
         } else if ecc > 5.5 && thickness < Double(max(1.0, spacing * 0.10)) && inkExtent < 0.32 {
             addPenalty(&penalties, "thin_line_like", 0.25)
         }
+        if let source = binaryClean ?? binaryRaw,
+           let metrics = computeRowRunMetrics(rect: rect, bin: source.0, pageW: source.1, pageH: source.2) {
+            if metrics.centerRowMaxRunFrac > 0.80 && metrics.rowsWithLongRunsFrac > 0.30 && metrics.fillRatio < 0.34 {
+                addPenalty(&penalties, "row_run_strong", 0.55)
+            } else if metrics.centerRowMaxRunFrac > 0.72 && metrics.rowsWithLongRunsFrac > 0.18 && metrics.fillRatio < 0.38 {
+                addPenalty(&penalties, "row_run", 0.35)
+            }
+        }
         // Beam / stem junction blobs (common source of “rows of circles”)
         // Beam / stem junction blobs (common source of “rows of circles”)
         if !strongNotehead, let binaryRaw {
@@ -1425,6 +1443,74 @@ enum OfflineScoreColorizer {
         return RowRunMetrics(fillRatio: fillRatio,
                              centerRowMaxRunFrac: centerRunFrac,
                              rowsWithLongRunsFrac: rowsFrac)
+    }
+
+    private static func suppressRowRunArtifacts(_ heads: [ScoredHead],
+                                                spacing: CGFloat,
+                                                binaryClean: ([UInt8], Int, Int)?,
+                                                binaryRaw: ([UInt8], Int, Int)?,
+                                                onReject: ((CGRect) -> Void)?) -> [ScoredHead] {
+        guard !heads.isEmpty else { return [] }
+        guard let source = binaryClean ?? binaryRaw else { return heads }
+        let (bin, pageW, pageH) = source
+        let rowBin = max(1.0, spacing * 0.18)
+        let spanThreshold = spacing * 4.0
+        let groupMinCount = 6
+        let rowLikeMinFraction = 0.60
+
+        var buckets: [Int: [Int]] = [:]
+        buckets.reserveCapacity(heads.count)
+
+        for (idx, head) in heads.enumerated() {
+            let key = Int((head.rect.midY / rowBin).rounded())
+            buckets[key, default: []].append(idx)
+        }
+
+        var remove = Set<Int>()
+        remove.reserveCapacity(heads.count / 4)
+
+        for (_, idxs) in buckets {
+            guard idxs.count >= groupMinCount else { continue }
+            var minX = CGFloat.greatestFiniteMagnitude
+            var maxX = CGFloat.leastNormalMagnitude
+            for idx in idxs {
+                let rect = heads[idx].rect
+                minX = min(minX, rect.minX)
+                maxX = max(maxX, rect.maxX)
+            }
+            guard (maxX - minX) >= spanThreshold else { continue }
+
+            var rowLike: [Int: Bool] = [:]
+            rowLike.reserveCapacity(idxs.count)
+            var rowLikeCount = 0
+
+            for idx in idxs {
+                let rect = heads[idx].rect
+                guard let metrics = computeRowRunMetrics(rect: rect, bin: bin, pageW: pageW, pageH: pageH) else { continue }
+                let isRowLike = metrics.centerRowMaxRunFrac > 0.72 &&
+                    metrics.rowsWithLongRunsFrac > 0.18 &&
+                    metrics.fillRatio < 0.40
+                if isRowLike { rowLikeCount += 1 }
+                rowLike[idx] = isRowLike
+            }
+
+            guard Double(rowLikeCount) / Double(idxs.count) >= rowLikeMinFraction else { continue }
+
+            for idx in idxs {
+                guard rowLike[idx] == true else { continue }
+                let head = heads[idx]
+                let keep = head.isHeadLike || head.shapeScore >= 0.62
+                if !keep {
+                    remove.insert(idx)
+                    onReject?(head.rect)
+                }
+            }
+        }
+
+        if remove.isEmpty { return heads }
+        return heads.enumerated().compactMap { idx, head in
+            remove.contains(idx) ? nil : head
+        }
     }
 
     private static func logDamagedNoteheadsIfNeeded(filtered: [CGRect],
