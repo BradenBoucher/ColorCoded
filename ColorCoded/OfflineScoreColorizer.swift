@@ -58,12 +58,205 @@ private var debugMaskData: DebugMaskData?
 private var debugRejectedRects: [DebugRejectedRect]?
 
 enum OfflineScoreColorizer {
+    private static func processRenderedPage(image: PlatformImage, pageIndex: Int, totalPages: Int) async -> PlatformImage {
+        let pageStart = CFAbsoluteTimeGetCurrent()
+
+        let staffStart = CFAbsoluteTimeGetCurrent()
+        let staffModel = await StaffDetector.detectStaff(in: image)
+        let staffMs = (CFAbsoluteTimeGetCurrent() - staffStart) * 1000.0
+        log.notice("PERF staffMs=\(String(format: "%.1f", staffMs), privacy: .public)")
+        logStaffDiagnostics(staffModel)
+
+        let systemsStart = CFAbsoluteTimeGetCurrent()
+        let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
+        let systemsMs = (CFAbsoluteTimeGetCurrent() - systemsStart) * 1000.0
+        log.notice("PERF systemsMs=\(String(format: "%.1f", systemsMs), privacy: .public)")
+
+        let protectStart = CFAbsoluteTimeGetCurrent()
+        let protectNoteRects = await NoteheadDetector.detectNoteheads(in: image)
+        let protectDetectMs = (CFAbsoluteTimeGetCurrent() - protectStart) * 1000.0
+        log.notice("PERF protectDetectMs=\(String(format: "%.1f", protectDetectMs), privacy: .public)")
+
+        debugMaskData = nil
+        let strokeStart = CFAbsoluteTimeGetCurrent()
+        let cleaned = await buildStrokeCleaned(
+            baseImage: image,
+            staffModel: staffModel,
+            systems: systems,
+            protectRects: protectNoteRects
+        )
+        let strokeMs = (CFAbsoluteTimeGetCurrent() - strokeStart) * 1000.0
+        log.notice("PERF strokeMs=\(String(format: "%.1f", strokeMs), privacy: .public)")
+
+        let cleanedBinary = cleaned?.binaryPage
+        let rawBinary = cleaned?.binaryRaw
+        log.notice("systems.count=\(systems.count, privacy: .public) cleaned!=nil=\(cleaned != nil, privacy: .public) override!=nil=\(cleanedBinary != nil, privacy: .public)")
+
+        // ==========================
+        // PASS2 MERGE MOP-UP
+        // ==========================
+        let contourStart = CFAbsoluteTimeGetCurrent()
+
+        var pass2CleanCount: Int?
+        var pass2RawCount: Int?
+
+        @inline(__always)
+        func _iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
+            let inter = a.intersection(b)
+            if inter.isNull { return 0 }
+            let interA = inter.width * inter.height
+            if interA <= 0 { return 0 }
+            let unionA = a.width * a.height + b.width * b.height - interA
+            return unionA > 0 ? (interA / unionA) : 0
+        }
+
+        @inline(__always)
+        func _insideAnySystem(_ p: CGPoint) -> Bool {
+            for s in systems { if s.bbox.contains(p) { return true } }
+            return false
+        }
+
+        // Seed with protect baseline
+        var merged = protectNoteRects
+        let protectCount = merged.count
+
+        func _mergeMopUp(_ mop: [CGRect]) {
+            guard !mop.isEmpty else { return }
+            for r in mop {
+                let c = CGPoint(x: r.midX, y: r.midY)
+                guard _insideAnySystem(c) else { continue }
+
+                var overlaps = false
+                for e in merged {
+                    if _iou(r, e) >= 0.15 { overlaps = true; break }
+                }
+                if !overlaps { merged.append(r) }
+            }
+        }
+
+        if let cleanedBinary {
+            let pass2Clean = await NoteheadDetector.detectNoteheads(
+                in: image,
+                contoursBinaryOverride: cleanedBinary,
+                systems: systems
+            )
+            pass2CleanCount = pass2Clean.count
+            _mergeMopUp(pass2Clean)
+
+            let rawFallbackThreshold = max(1, Int(ceil(Double(max(1, protectCount)) * 0.92)))
+            if pass2Clean.count < rawFallbackThreshold, let rb = rawBinary {
+                let pass2Raw = await NoteheadDetector.detectNoteheads(
+                    in: image,
+                    contoursBinaryOverride: rb,
+                    systems: systems
+                )
+                pass2RawCount = pass2Raw.count
+                _mergeMopUp(pass2Raw)
+            }
+        } else if let rb = rawBinary {
+            let pass2Raw = await NoteheadDetector.detectNoteheads(
+                in: image,
+                contoursBinaryOverride: rb,
+                systems: systems
+            )
+            pass2RawCount = pass2Raw.count
+            _mergeMopUp(pass2Raw)
+        }
+
+        let noteRects = merged
+
+        let p2c = pass2CleanCount ?? -1
+        let p2r = pass2RawCount ?? -1
+        let bestCount = noteRects.count
+
+        log.notice("pass2Clean(CCL)=\(p2c, privacy: .public)")
+        log.notice("pass2Raw(CCL)=\(p2r, privacy: .public)")
+        log.notice("protect(Vision)=\(protectCount, privacy: .public)")
+        log.notice("best=\(bestCount, privacy: .public)")
+
+
+        let contourMs = (CFAbsoluteTimeGetCurrent() - contourStart) * 1000.0
+        log.notice("PERF contoursMs=\(String(format: "%.1f", contourMs), privacy: .public)")
+
+        // Barlines
+        let barlineStart = CFAbsoluteTimeGetCurrent()
+        let barlinesRaw = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
+        let barlinesFiltered = filterConfidentBarlines(
+            barlinesRaw,
+            systems: systems,
+            spacing: staffModel?.lineSpacing ?? 12.0,
+            binaryRaw: rawBinary
+        )
+        let barlines = sanitizeBarlines(
+            barlinesFiltered,
+            systems: systems,
+            spacing: staffModel?.lineSpacing ?? 12.0
+        )
+        let barlineMs = (CFAbsoluteTimeGetCurrent() - barlineStart) * 1000.0
+        log.notice("PERF barMs=\(String(format: "%.1f", barlineMs), privacy: .public)")
+
+        // These MUST be defined here (this is what broke your inline version)
+        let spacing = max(6.0, staffModel?.lineSpacing ?? 12.0)
+        let cg = image.cgImageSafe
+
+        let filterStart = CFAbsoluteTimeGetCurrent()
+        let filtered = OfflineScoreColorizer.filterNoteheadsHighRecall_DROPIN(
+            noteRects,
+            systems: systems,
+            barlines: barlines,
+            fallbackSpacing: spacing,
+            cgImage: cg,
+            binaryRawOverride: rawBinary,
+            binaryCleanOverride: cleanedBinary
+        )
+        let filterMs = (CFAbsoluteTimeGetCurrent() - filterStart) * 1000.0
+        log.notice("PERF filterMs=\(String(format: "%.1f", filterMs), privacy: .public)")
+
+        let horizErasedCount = cleaned?.horizErasedCount ?? -1
+        let vertErasedCount = cleaned?.vertErasedCount ?? -1
+        let watermarkText = "PIPELINE: CLEANED=\(cleaned != nil) V=\(vertErasedCount) H=\(horizErasedCount)"
+        let statusStamp = "sys=\(systems.count) v=\(vertErasedCount) h=\(horizErasedCount) notes=\(filtered.count)"
+
+        let drawStart = CFAbsoluteTimeGetCurrent()
+        let colored = drawOverlays(
+            on: image,
+            staff: staffModel,
+            systems: systems,
+            noteheads: filtered,
+            barlines: barlines,
+            pipelineWatermark: watermarkText,
+            statusStamp: statusStamp
+        )
+        let drawMs = (CFAbsoluteTimeGetCurrent() - drawStart) * 1000.0
+        log.notice("PERF drawMs=\(String(format: "%.1f", drawMs), privacy: .public)")
+
+        let pageMs = (CFAbsoluteTimeGetCurrent() - pageStart) * 1000.0
+        let pageStr = "\(pageIndex + 1)/\(totalPages)"
+        log.notice("TIMING page=\(pageStr, privacy: .public) totalMs=\(String(format: "%.1f", pageMs), privacy: .public)")
+
+        log.notice("TIMING staffMs=\(String(format: "%.1f", staffMs), privacy: .public)")
+        log.notice("TIMING systemsMs=\(String(format: "%.1f", systemsMs), privacy: .public)")
+        log.notice("TIMING strokeMs=\(String(format: "%.1f", strokeMs), privacy: .public)")
+        log.notice("TIMING noteMs=\(String(format: "%.1f", protectDetectMs), privacy: .public)")
+        log.notice("TIMING barMs=\(String(format: "%.1f", barlineMs), privacy: .public)")
+        log.notice("TIMING filterMs=\(String(format: "%.1f", filterMs), privacy: .public)")
+        log.notice("TIMING drawMs=\(String(format: "%.1f", drawMs), privacy: .public)")
+
+
+        debugMaskData = nil
+        debugRejectedRects = nil
+
+        return colored
+    }
+
+
     private static let log = Logger(subsystem: "ColorCoded", category: "OfflinePipeline")
+    
 
     // ------------------------------------------------------------------
     // TUNING
     // ------------------------------------------------------------------
-
+    
     private enum RejectTuning {
         static let ledgerRunFrac: Double = 0.70
         static let ledgerFillMax: Double = 0.12
@@ -135,243 +328,34 @@ enum OfflineScoreColorizer {
                     }
                     let renderMs = (CFAbsoluteTimeGetCurrent() - renderStart) * 1000.0
                     log.notice("PERF renderMs=\(String(format: "%.1f", renderMs), privacy: .public)")
-
-                    Task {
-                        let pageStart = CFAbsoluteTimeGetCurrent()
-                        let staffStart = CFAbsoluteTimeGetCurrent()
-                        let staffModel = await StaffDetector.detectStaff(in: image)
-                        let staffMs = (CFAbsoluteTimeGetCurrent() - staffStart) * 1000.0
-                        log.notice("PERF staffMs=\(String(format: "%.1f", staffMs), privacy: .public)")
-                        logStaffDiagnostics(staffModel)
-                        let systemsStart = CFAbsoluteTimeGetCurrent()
-                        let systems = SystemDetector.buildSystems(from: staffModel, imageSize: image.size)
-                        let systemsMs = (CFAbsoluteTimeGetCurrent() - systemsStart) * 1000.0
 //
-                        //
-                        //
-                        //
-                        //
-                        //
-                        //
-                        //
-                        let protectStart = CFAbsoluteTimeGetCurrent()
+                    //
+                    //
+                    //
+                    //
+                    //
+                    //
+                    //
+                    //
+                    //
+                    //
+                    //
+                    //
+                    //
+                    //
+                    //
+                    Task {
+                        let colored = await processRenderedPage(image: image, pageIndex: pageIndex, totalPages: doc.pageCount)
 
-                        // Pass 1: protectRects on original image (cheap + keeps recall)
-                        let protectNoteRects = await NoteheadDetector.detectNoteheads(in: image)
-                        let protectDetectMs = (CFAbsoluteTimeGetCurrent() - protectStart) * 1000.0
-                        log.notice("PERF protectDetectMs=\(String(format: "%.1f", protectDetectMs), privacy: .public)")
-
-                        // Build stroke-cleaned image AND keep the cleaned binary.
-                        debugMaskData = nil
-                        let strokeStart = CFAbsoluteTimeGetCurrent()
-                        let cleaned = await buildStrokeCleaned(
-                            baseImage: image,
-                            staffModel: staffModel,
-                            systems: systems,
-                            protectRects: protectNoteRects
-                        )
-                        let strokeMs = (CFAbsoluteTimeGetCurrent() - strokeStart) * 1000.0
-                        log.notice("PERF strokeMs=\(String(format: "%.1f", strokeMs), privacy: .public)")
-                        if cleaned == nil {
-                            debugMaskData = nil
-                        }
-
-                        let cleanedBinary = cleaned?.binaryPage
-                        let rawBinary = cleaned?.binaryRaw
-                        log.notice("systems.count=\(systems.count, privacy: .public) cleaned!=nil=\(cleaned != nil, privacy: .public) override!=nil=\(cleanedBinary != nil, privacy: .public)")
-
-                        // Pass 2: do contours on binary (MUCH more stable).
-                        // IMPORTANT: never overwrite a better result with a worse one.
-                        let contourStart = CFAbsoluteTimeGetCurrent()
-
-                        var best = protectNoteRects
-                        let protectCount = protectNoteRects.count
-                        //
-                        //
-                        //
-                        //
-                        //
-                        //
-                        //
-                        //
-                        //
-                        //
-                        //
-                        //
-                        // ============================================================
-                        // === START: PASS2 MERGE MOP-UP (REPLACE ENTIRE OLD keepIfBetter BLOCK)
-                        // ============================================================
-
-                        var pass2CleanCount: Int?
-                        var pass2RawCount: Int?
-
-                        @inline(__always)
-                        func _iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
-                            let inter = a.intersection(b)
-                            if inter.isNull { return 0 }
-                            let interA = inter.width * inter.height
-                            if interA <= 0 { return 0 }
-                            let unionA = a.width * a.height + b.width * b.height - interA
-                            return unionA > 0 ? (interA / unionA) : 0
-                        }
-
-                        @inline(__always)
-                        func _center(_ r: CGRect) -> CGPoint { CGPoint(x: r.midX, y: r.midY) }
-
-                        @inline(__always)
-                        func _insideAnySystem(_ p: CGPoint, systems: [SystemBlock]) -> Bool {
-                            for s in systems { if s.bbox.contains(p) { return true } }
-                            return false
-                        }
-
-                        // Seed = Vision protect baseline (best recall anchor)
-                        var merged = best   // your code already sets `best` to the protect(Vision) result
-                        let protectCount = merged.count
-
-                        func _mergeMopUp(_ mop: [CGRect], into merged: inout [CGRect], systems: [SystemBlock]) {
-                            guard !mop.isEmpty else { return }
-                            for r in mop {
-                                let c = _center(r)
-
-                                // Safety: only keep CCL results that land inside systems
-                                guard _insideAnySystem(c, systems: systems) else { continue }
-
-                                // Only add if it doesn't overlap an existing detection
-                                var overlaps = false
-                                for e in merged {
-                                    if _iou(r, e) >= 0.15 {
-                                        overlaps = true
-                                        break
-                                    }
-                                }
-                                if !overlaps { merged.append(r) }
+                        await MainActor.run {
+                            if let pdfPage = PDFPage(image: colored) {
+                                outDoc.insert(pdfPage, at: outDoc.pageCount)
                             }
                         }
 
-                        if let cleanedBinary {
-                            let pass2Clean = await NoteheadDetector.detectNoteheads(
-                                in: image,
-                                contoursBinaryOverride: cleanedBinary,
-                                systems: systems
-                            )
-                            pass2CleanCount = pass2Clean.count
-                            _mergeMopUp(pass2Clean, into: &merged, systems: systems)
-
-                            // Run raw fallback only if cleaned CCL is materially worse than protect
-                            let rawFallbackThreshold = max(1, Int(ceil(Double(max(1, protectCount)) * 0.92)))
-                            if pass2Clean.count < rawFallbackThreshold, let rb = rawBinary {
-                                let pass2Raw = await NoteheadDetector.detectNoteheads(
-                                    in: image,
-                                    contoursBinaryOverride: rb,
-                                    systems: systems
-                                )
-                                pass2RawCount = pass2Raw.count
-                                _mergeMopUp(pass2Raw, into: &merged, systems: systems)
-                            }
-                        } else if let rb = rawBinary {
-                            let pass2Raw = await NoteheadDetector.detectNoteheads(
-                                in: image,
-                                contoursBinaryOverride: rb,
-                                systems: systems
-                            )
-                            pass2RawCount = pass2Raw.count
-                            _mergeMopUp(pass2Raw, into: &merged, systems: systems)
-                        }
-
-                        // Final chosen set = protect + non-overlapping CCL mop-up
-                        let noteRects = merged
-
-                        log.notice(
-                            "pass2Clean(CCL)=\(pass2CleanCount ?? -1, privacy: .public) " +
-                            "pass2Raw(CCL)=\(pass2RawCount ?? -1, privacy: .public) " +
-                            "protect(Vision)=\(protectCount, privacy: .public) " +
-                            "best=\(noteRects.count, privacy: .public)"
-                        )
-
-                        let contourMs = (CFAbsoluteTimeGetCurrent() - contourStart) * 1000.0
-                        log.notice("PERF contoursMs=\(String(format: "%.1f", contourMs), privacy: .public)")
-
-                        // ============================================================
-                        // === END: PASS2 MERGE MOP-UP
-                        // ============================================================
-
-
-
-                        // High recall note candidates
-                        let detection = NoteDetectionDebug(noteRects: noteRects)
-                        let debugDetectMs = 0.0
-                        log.notice("PERF debugDetectMs=\(String(format: "%.1f", debugDetectMs), privacy: .public)")
-
-
-
-                        // Barlines
-                        let barlineStart = CFAbsoluteTimeGetCurrent()
-                        let barlinesRaw = image.cgImageSafe.map { BarlineDetector.detectBarlines(in: $0, systems: systems) } ?? []
-                        let barlinesFiltered = filterConfidentBarlines(barlinesRaw,
-                                                                       systems: systems,
-                                                                       spacing: staffModel?.lineSpacing ?? 12.0,
-                                                                       binaryRaw: rawBinary)
-                        let barlines = sanitizeBarlines(barlinesFiltered,
-                                                        systems: systems,
-                                                        spacing: staffModel?.lineSpacing ?? 12.0)
-                        let barlineMs = (CFAbsoluteTimeGetCurrent() - barlineStart) * 1000.0
-                        log.notice("PERF barMs=\(String(format: "%.1f", barlineMs), privacy: .public)")
-
-                        // Use raw binary for shape metrics, cleaned binary for line/stem rejection.
-                        let filterStart = CFAbsoluteTimeGetCurrent()
-                        let filtered = OfflineScoreColorizer.filterNoteheadsHighRecall_DROPIN(
-                            noteRects,
-                            systems: systems,
-                            barlines: barlines,
-                            fallbackSpacing: spacing,
-                            cgImage: cg,
-                            binaryRawOverride: rawBinary,
-                            binaryCleanOverride: cleanedBinary
-                        )
-
-                        let filterMs = (CFAbsoluteTimeGetCurrent() - filterStart) * 1000.0
-                        log.notice("PERF filterMs=\(String(format: "%.1f", filterMs), privacy: .public)")
-
-                        let horizErasedCount = cleaned?.horizErasedCount ?? -1
-                        let vertErasedCount = cleaned?.vertErasedCount ?? -1
-                        let horizArea = cleaned?.horizEraseArea ?? 0
-                        let horizEraseFrac = horizArea > 0 ? Double(horizErasedCount) / Double(horizArea) : 0
-                        log.notice("metrics systems=\(systems.count, privacy: .public) v=\(vertErasedCount, privacy: .public) h=\(horizErasedCount, privacy: .public) hFrac=\(horizEraseFrac, privacy: .public) candidates=\(detection.noteRects.count, privacy: .public) filtered=\(filtered.count, privacy: .public)")
-                        logDamagedNoteheadsIfNeeded(filtered: filtered,
-                                                    binaryRaw: rawBinary,
-                                                    binaryClean: cleanedBinary)
-                        let statusStamp = "sys=\(systems.count) v=\(vertErasedCount) h=\(horizErasedCount) notes=\(filtered.count)"
-                        let watermarkText = "PIPELINE: CLEANED=\(cleaned != nil) V=\(vertErasedCount) H=\(horizErasedCount)"
-                        let drawStart = CFAbsoluteTimeGetCurrent()
-                        let colored = drawOverlays(
-                            on: image,
-                            staff: staffModel,
-                            systems: systems,
-                            noteheads: filtered,
-                            barlines: barlines,
-                            pipelineWatermark: watermarkText,
-                            statusStamp: statusStamp
-                        )
-                        let drawMs = (CFAbsoluteTimeGetCurrent() - drawStart) * 1000.0
-                        log.notice("PERF drawMs=\(String(format: "%.1f", drawMs), privacy: .public)")
-
-                        let pdfStart = CFAbsoluteTimeGetCurrent()
-                        if let pdfPage = PDFPage(image: colored) {
-                            outDoc.insert(pdfPage, at: outDoc.pageCount)
-                        }
-                        let pdfMs = (CFAbsoluteTimeGetCurrent() - pdfStart) * 1000.0
-                        log.notice("PERF pdfMs=\(String(format: "%.1f", pdfMs), privacy: .public)")
-                        let pageMs = (CFAbsoluteTimeGetCurrent() - pageStart) * 1000.0
-                        let strokeBinaryMs = cleaned?.perfBinaryBuildMs ?? 0
-                        let strokeCopyMs = cleaned?.perfBinaryCopyMs ?? 0
-                        let strokeGsmMs = cleaned?.perfGlobalStrokeMaskMs ?? 0
-                        let strokeProtectMs = cleaned?.perfProtectMaskMs ?? 0
-                        let strokeRoiMs = cleaned?.perfRoiTotalMs ?? 0
-                        log.notice("TIMING page=\(pageIndex + 1, privacy: .public) render=\(String(format: "%.1f", renderMs), privacy: .public)ms staff=\(String(format: "%.1f", staffMs), privacy: .public)ms systems=\(String(format: "%.1f", systemsMs), privacy: .public)ms stroke=\(String(format: "%.1f", strokeMs), privacy: .public)ms strokeBin=\(String(format: "%.1f", strokeBinaryMs), privacy: .public)ms strokeCopy=\(String(format: "%.1f", strokeCopyMs), privacy: .public)ms strokeGsm=\(String(format: "%.1f", strokeGsmMs), privacy: .public)ms strokeProtect=\(String(format: "%.1f", strokeProtectMs), privacy: .public)ms strokeRoi=\(String(format: "%.1f", strokeRoiMs), privacy: .public)ms note=\(String(format: "%.1f", protectDetectMs), privacy: .public)ms bar=\(String(format: "%.1f", barlineMs), privacy: .public)ms filter=\(String(format: "%.1f", filterMs), privacy: .public)ms draw=\(String(format: "%.1f", drawMs), privacy: .public)ms pdf=\(String(format: "%.1f", pdfMs), privacy: .public)ms total=\(String(format: "%.1f", pageMs), privacy: .public)ms")
-                        debugMaskData = nil
-                        debugRejectedRects = nil
                         continuation.resume(returning: ())
                     }
+
                 }
             }
         }
