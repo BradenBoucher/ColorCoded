@@ -1218,6 +1218,14 @@ enum OfflineScoreColorizer {
         } else if ecc > 5.5 && thickness < Double(max(1.0, spacing * 0.10)) && inkExtent < 0.32 {
             addPenalty(&penalties, "thin_line_like", 0.25)
         }
+        if let source = binaryClean ?? binaryRaw,
+           let metrics = computeRowRunMetrics(rect: rect, bin: source.0, pageW: source.1, pageH: source.2) {
+            if metrics.centerRowMaxRunFrac > 0.80 && metrics.rowsWithLongRunsFrac > 0.30 && metrics.fillRatio < 0.34 {
+                addPenalty(&penalties, "row_run_strong", 0.55)
+            } else if metrics.centerRowMaxRunFrac > 0.72 && metrics.rowsWithLongRunsFrac > 0.18 && metrics.fillRatio < 0.38 {
+                addPenalty(&penalties, "row_run", 0.35)
+            }
+        }
         // Beam / stem junction blobs (common source of “rows of circles”)
         // Beam / stem junction blobs (common source of “rows of circles”)
         if !strongNotehead, let binaryRaw {
