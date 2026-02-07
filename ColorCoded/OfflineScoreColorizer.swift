@@ -180,7 +180,22 @@ enum OfflineScoreColorizer {
 
         for r in protectNoteRects {
             if _hasOverlap(r, confirmRefs, thr: confirmThr) {
-                merged.append(r)
+                if let cleanedBinary {
+                    let (bin, w, h) = cleanedBinary
+                    let ext = rectInkExtent(r, bin: bin, pageW: w, pageH: h)
+                    let pca = lineLikenessPCA(r, bin: bin, pageW: w, pageH: h)
+
+                    let aspect = r.width / max(1.0, r.height)
+                    let aspectOK = aspect > 0.65 && aspect < 1.55
+                    let fillOK = ext > 0.16 && ext < 0.85
+                    let notLine = !pca.isLineLike && pca.eccentricity < 5.2
+
+                    if aspectOK && fillOK && notLine {
+                        merged.append(r)
+                    }
+                } else {
+                    merged.append(r)
+                }
             }
         }
 
