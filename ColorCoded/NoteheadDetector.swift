@@ -137,9 +137,9 @@ enum NoteheadDetector {
                     candidates = StaffStepGate.filterCandidates(
                         candidates,
                         system: system,
-                        softTolerance: 0.45,
-                        hardTolerance: 0.62,
-                        maxSteps: 26,
+                        softTolerance: 0.50,
+                        hardTolerance: 0.68,
+                        maxSteps: 28,
                         preferBassInGap: true
                     )
 
@@ -345,19 +345,19 @@ enum NoteheadDetector {
         let ar = w / max(1, h)
 
         let arScore: CGFloat = {
-            if ar < 0.45 { return 0.0 }
-            if ar > 2.40 { return 0.0 }
-            let d = abs(ar - 1.20)
-            return max(0, 1.0 - d / 1.20)
+            if ar < 0.35 { return 0.0 }
+            if ar > 2.70 { return 0.0 }
+            let d = abs(ar - 1.10)
+            return max(0, 1.0 - d / 1.35)
         }()
 
         let fillScore: CGFloat = {
-            if inkFrac < 0.05 { return 0.0 }
-            if inkFrac > 0.78 { return 0.10 }
-            if inkFrac <= 0.45 {
-                return max(0, (inkFrac - 0.05) / 0.40)
+            if inkFrac < 0.03 { return 0.0 }
+            if inkFrac > 0.85 { return 0.10 }
+            if inkFrac <= 0.50 {
+                return max(0, (inkFrac - 0.03) / 0.47)
             } else {
-                return max(0, 1.0 - (inkFrac - 0.45) / 0.33)
+                return max(0, 1.0 - (inkFrac - 0.50) / 0.35)
             }
         }()
 
@@ -366,7 +366,7 @@ enum NoteheadDetector {
 
         let shape = (arScore * 0.45) + (fillScore * 0.35) + (strokeScore * 0.20)
         head.shapeScore = max(0, min(1, shape))
-        head.isHeadLike = head.shapeScore >= 0.35
+        head.isHeadLike = head.shapeScore >= 0.30
     }
 
     private static func hardRejectTailOrStem(_ h: ScoredHead, spacing: CGFloat) -> Bool {
@@ -377,11 +377,11 @@ enum NoteheadDetector {
         let stroke = h.strokeOverlap ?? 0
         let ink = h.inkExtent ?? 0
 
-        if stroke >= 0.60 && ar < 0.70 { return true }
-        if ar < 0.42 && ink < 0.22 { return true }
+        if stroke >= 0.65 && ar < 0.60 { return true }
+        if ar < 0.38 && ink < 0.18 { return true }
 
         let area = w * hh
-        if area < max(14.0, spacing * spacing * 0.08), ink < 0.35, stroke > 0.10 {
+        if area < max(12.0, spacing * spacing * 0.06), ink < 0.30, stroke > 0.12 {
             return true
         }
 
